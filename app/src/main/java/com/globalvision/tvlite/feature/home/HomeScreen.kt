@@ -1,4 +1,4 @@
-package com.globalvision.tvlite.feature.home
+﻿package com.globalvision.tvlite.feature.home
 
 import android.app.Activity
 import android.util.Log
@@ -95,7 +95,7 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 
 private const val PAGE_SIZE = 30
 // 调大 Filter 芯片高度，使其在大屏更有存在感
-private val FilterChipHeight = 36.dp 
+private val FilterChipHeight = 32.dp
 private val FilterChipShape = RoundedCornerShape(10.dp) // Apple 偏向富有几何感的圆角
 
 private enum class HomeFocusZone {
@@ -398,7 +398,7 @@ fun HomeScreen(
                     .weight(1f)
                     .fillMaxHeight()
                     .focusGroup(),
-                verticalArrangement = Arrangement.spacedBy(20.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 if (activeNavId > 0 && activeFilterGroup != null) {
                     FilterPanel(
@@ -433,8 +433,8 @@ fun HomeScreen(
                     // 核心网格布局
                     LazyVerticalGrid(
                         columns = GridCells.Fixed(5), // 从 6 列改为 5 列，使海报在 4K 上更大、更有表现力
-                        horizontalArrangement = Arrangement.spacedBy(20.dp),
-                        verticalArrangement = Arrangement.spacedBy(24.dp),
+                        horizontalArrangement = Arrangement.spacedBy(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(14.dp),
                         contentPadding = PaddingValues(bottom = 24.dp),
                         modifier = Modifier
                             .weight(1f)
@@ -536,7 +536,7 @@ private fun SearchAction(
         shape = shape,
         modifier = modifier
             .consumeRepeatedDpadEvents()
-            .size(54.dp) // 适度放大尺寸
+            .size(50.dp)
             .focusRequester(focusRequester)
             .onFocusChanged {
                 focused = it.isFocused
@@ -599,7 +599,7 @@ private fun SidebarTab(
         shape = shape,
         modifier = modifier
             .fillMaxWidth()
-            .height(48.dp)
+            .height(44.dp)
             .consumeRepeatedDpadEvents()
             .focusProperties {
                 rightFocusRequester?.let { right = it }
@@ -640,7 +640,7 @@ private fun FilterPanel(
 ) {
     // 摒弃杂乱组合，对筛选容器进行统一约束
     Column(
-        verticalArrangement = Arrangement.spacedBy(10.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
         modifier = Modifier.fillMaxWidth()
     ) {
         FilterRow(
@@ -707,7 +707,7 @@ private fun FilterRow(
                 fontSize = 16.sp,
                 color = Color.White.copy(alpha = 0.4f)
             ),
-            modifier = Modifier.width(64.dp)
+            modifier = Modifier.width(56.dp)
         )
         
         // 关键改动：将原本基础 Row 的横向滚动重构为 LazyRow，完美解决横向遥控获焦卡顿与溢出电视屏幕的问题
@@ -715,9 +715,9 @@ private fun FilterRow(
             modifier = Modifier
                 .weight(1f)
                 .focusGroup(),
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalAlignment = Alignment.CenterVertically,
-            contentPadding = PaddingValues(horizontal = 4.dp, vertical = 6.dp)
+            contentPadding = PaddingValues(horizontal = 2.dp, vertical = 2.dp)
         ) {
             if (showAll) {
                 item {
@@ -801,7 +801,7 @@ private fun FilterItemChip(
         Box(
             modifier = Modifier
                 .fillMaxHeight()
-                .padding(horizontal = 18.dp),
+                .padding(horizontal = 14.dp),
             contentAlignment = Alignment.Center,
         ) {
             Text(
@@ -843,7 +843,7 @@ private fun CompactPosterCard(
                 scaleX = scale
                 scaleY = scale
             }
-            .padding(4.dp)
+            .padding(2.dp)
     ) {
         // 海报容器
         Card(
@@ -851,7 +851,7 @@ private fun CompactPosterCard(
             shape = shape,
             modifier = Modifier
                 .fillMaxWidth()
-                .aspectRatio(0.7f), // 经典标准电影海报比例
+                .aspectRatio(0.82f),
             colors = CardDefaults.cardColors(containerColor = Color(0xFF1F1F1F)),
         ) {
             Box(modifier = Modifier.fillMaxSize()) {
@@ -869,10 +869,10 @@ private fun CompactPosterCard(
                         .background(
                             Brush.verticalGradient(
                                 colors = listOf(
-                                    Color.Black.copy(alpha = 0.1f),
-                                    Color.Black.copy(alpha = 0.7f)
+                                    Color.Transparent,
+                                    Color.Black.copy(alpha = 0.78f)
                                 ),
-                                startY = 300f
+                                startY = 260f
                             )
                         ),
                 )
@@ -898,36 +898,39 @@ private fun CompactPosterCard(
                         maxLines = 1,
                     )
                 }
+
+                Column(
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .fillMaxWidth()
+                        .padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    Text(
+                        text = item.title,
+                        style = MaterialTheme.typography.titleMedium.copy(
+                            fontSize = 16.sp,
+                            fontWeight = if (focused) FontWeight.ExtraBold else FontWeight.Bold,
+                            color = Color.White,
+                        ),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+
+                    val subInfo = listOf(item.year, item.category).filter { it.isNotBlank() }.joinToString(" · ")
+                    if (subInfo.isNotBlank()) {
+                        Text(
+                            text = subInfo,
+                            style = MaterialTheme.typography.bodyMedium.copy(
+                                fontSize = 12.sp,
+                                color = Color.White.copy(alpha = 0.72f),
+                            ),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
             }
-        }
-        
-        Spacer(modifier = Modifier.height(10.dp))
-        
-        // 极大强化后的影视标题：提升 4K 电视的可读性，防止缩放时失焦
-        Text(
-            text = item.title,
-            style = MaterialTheme.typography.titleMedium.copy(
-                fontSize = 17.sp, // 从 labelMedium 跨越式提权到大字号
-                fontWeight = if (focused) FontWeight.ExtraBold else FontWeight.Bold,
-                color = if (focused) Color.White else Color.White.copy(alpha = 0.85f)
-            ),
-            modifier = Modifier.padding(horizontal = 4.dp),
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis
-        )
-        
-        val subInfo = listOf(item.year, item.category).filter { it.isNotBlank() }.joinToString(" · ")
-        if (subInfo.isNotBlank()) {
-            Spacer(modifier = Modifier.height(2.dp))
-            Text(
-                text = subInfo,
-                style = MaterialTheme.typography.bodyMedium.copy(
-                    fontSize = 14.sp,
-                    color = if (focused) Color.White.copy(alpha = 0.7f) else Color.White.copy(alpha = 0.45f)
-                ),
-                modifier = Modifier.padding(horizontal = 4.dp),
-                maxLines = 1,
-            )
         }
     }
 }

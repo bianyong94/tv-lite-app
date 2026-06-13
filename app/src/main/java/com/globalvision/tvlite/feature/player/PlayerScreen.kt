@@ -23,14 +23,11 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -50,6 +47,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
@@ -63,7 +61,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.common.Player
 import androidx.media3.common.PlaybackException
@@ -102,9 +99,6 @@ fun PlayerScreen(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val controller = remember { TvPlayerController(context) }
-    val controlsScrollState = rememberScrollState()
-    val configuration = LocalConfiguration.current
-    val controlPanelHeight = (configuration.screenHeightDp.dp * 0.2f).coerceAtLeast(180.dp)
 
     var showControls by remember { mutableStateOf(true) }
     var showEpisodePicker by remember { mutableStateOf(false) }
@@ -378,14 +372,6 @@ fun PlayerScreen(
                             hideAllOverlays()
                             true
                         }
-                        Key.DirectionDown -> {
-                            showControlsOverlay()
-                            true
-                        }
-                        Key.Menu -> {
-                            keepOverlayAlive()
-                            true
-                        }
                         else -> false
                     }
                 }
@@ -585,16 +571,14 @@ fun PlayerScreen(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .padding(horizontal = layout.horizontalPadding / 2, vertical = 16.dp)
-                    .fillMaxWidth()
-                    .height(controlPanelHeight),
+                    .fillMaxWidth(),
                 shape = RoundedCornerShape((layout.railSpacing * 1.4f).coerceAtLeast(28.dp)),
                 color = Color(0xF20B0C10),
                 tonalElevation = 8.dp,
             ) {
                 Column(
                     modifier = Modifier
-                        .fillMaxSize()
-                        .verticalScroll(controlsScrollState)
+                        .fillMaxWidth()
                         .padding(horizontal = overlayPaddingH, vertical = overlayPaddingV),
                     verticalArrangement = Arrangement.spacedBy(overlaySpacing),
                 ) {
@@ -764,21 +748,18 @@ fun PlayerScreen(
             val currentSource = sources.getOrNull(currentSourceIndex)
             val currentEpisodes = currentSource?.code?.let { episodeCache[it] }.orEmpty()
                 .ifEmpty { currentSource?.episodes.orEmpty() }
-            val episodePanelHeight = (configuration.screenHeightDp.dp * 0.35f).coerceAtLeast(200.dp)
-
             Surface(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .padding(horizontal = layout.horizontalPadding / 2, vertical = 16.dp)
-                    .fillMaxWidth()
-                    .height(episodePanelHeight),
+                    .fillMaxWidth(),
                 shape = RoundedCornerShape((layout.railSpacing * 1.4f).coerceAtLeast(28.dp)),
                 color = Color(0xF20B0C10),
                 tonalElevation = 8.dp,
             ) {
                 Column(
                     modifier = Modifier
-                        .fillMaxSize()
+                        .fillMaxWidth()
                         .padding(horizontal = overlayPaddingH, vertical = overlayPaddingV),
                     verticalArrangement = Arrangement.spacedBy(overlaySpacing),
                 ) {
@@ -814,17 +795,15 @@ fun PlayerScreen(
                             color = Color.White.copy(alpha = 0.82f),
                         )
                     } else {
-                        LazyVerticalGrid(
-                            columns = GridCells.Fixed(maxOf(layout.episodeColumns, 8)),
-                            contentPadding = PaddingValues(horizontal = 2.dp, vertical = 8.dp),
-                            horizontalArrangement = Arrangement.spacedBy((layout.railSpacing * 0.5f).coerceAtLeast(10.dp)),
-                            verticalArrangement = Arrangement.spacedBy((layout.railSpacing * 0.5f).coerceAtLeast(10.dp)),
+                        FlowRow(
+                            maxItemsInEachRow = maxOf(layout.episodeColumns, 8),
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .weight(1f)
                                 .focusGroup(),
+                            horizontalArrangement = Arrangement.spacedBy((layout.railSpacing * 0.5f).coerceAtLeast(10.dp)),
+                            verticalArrangement = Arrangement.spacedBy((layout.railSpacing * 0.5f).coerceAtLeast(10.dp)),
                         ) {
-                            itemsIndexed(currentEpisodes, key = { index, episode -> "${episode.name}-$index" }) { index, episode ->
+                            currentEpisodes.forEachIndexed { index, episode ->
                                 TvFocusChip(
                                     text = episode.name,
                                     selected = index == currentEpisodeIndex,

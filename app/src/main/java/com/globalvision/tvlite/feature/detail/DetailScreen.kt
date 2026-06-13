@@ -4,6 +4,7 @@ import android.util.Log
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -39,6 +40,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
@@ -80,8 +82,14 @@ fun DetailScreen(
     
     // 页面核心首焦Requester
     val playFocusRequester = remember { FocusRequester() }
+    val posterFocusRequester = remember { FocusRequester() }
+    val titleFocusRequester = remember { FocusRequester() }
+    val descriptionFocusRequester = remember { FocusRequester() }
     val scrollState = rememberScrollState()
     var playButtonFocused by remember { mutableStateOf(false) }
+    var posterFocused by remember { mutableStateOf(false) }
+    var titleFocused by remember { mutableStateOf(false) }
+    var descriptionFocused by remember { mutableStateOf(false) }
 
     LaunchedEffect(movieId) {
         Log.d(tag, "load detail start: movieId=$movieId")
@@ -180,7 +188,7 @@ fun DetailScreen(
             
             // ================= 顶层：巨幕大字影视头信息 =================
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                val eyebrow = listOf(movie.year, movie.area).filter { it.isNotBlank() }.joinToString(" · ")
+                val eyebrow = listOf(movie.year, movie.area).filter { it.isNotBlank() }.joinToString(" 路 ")
                 if (eyebrow.isNotBlank()) {
                     Text(
                         text = eyebrow,
@@ -191,25 +199,61 @@ fun DetailScreen(
                         ),
                     )
                 }
-                Text(
-                    text = movie.title,
-                    style = MaterialTheme.typography.headlineLarge.copy(
-                        fontSize = 38.sp, // 大屏黄金清晰度
-                        fontWeight = FontWeight.ExtraBold
-                    ),
-                )
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .focusRequester(titleFocusRequester)
+                        .focusable()
+                        .onFocusChanged { titleFocused = it.isFocused }
+                        .focusProperties {
+                            up = posterFocusRequester
+                            down = descriptionFocusRequester
+                        }
+                        .border(
+                            width = if (titleFocused) 2.dp else 0.dp,
+                            color = if (titleFocused) MaterialTheme.colorScheme.primary else Color.Transparent,
+                            shape = RoundedCornerShape(10.dp),
+                        )
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                ) {
+                    Text(
+                        text = movie.title,
+                        style = MaterialTheme.typography.headlineLarge.copy(
+                            fontSize = 38.sp,
+                            fontWeight = FontWeight.ExtraBold
+                        ),
+                    )
+                }
                 val subtitle = listOf(
                     movie.remarks,
                     movie.actor.takeIf { it.isNotBlank() }?.let { "主演：$it" },
                 ).filterNotNull().joinToString("    ")
                 if (subtitle.isNotBlank()) {
-                    Text(
-                        text = subtitle,
-                        style = MaterialTheme.typography.bodyLarge.copy(
-                            fontSize = 16.sp,
-                            color = Color.White.copy(alpha = 0.6f)
-                        ),
-                    )
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .focusRequester(descriptionFocusRequester)
+                            .focusable()
+                            .onFocusChanged { descriptionFocused = it.isFocused }
+                            .focusProperties {
+                                up = titleFocusRequester
+                                down = playFocusRequester
+                            }
+                            .border(
+                                width = if (descriptionFocused) 2.dp else 0.dp,
+                                color = if (descriptionFocused) MaterialTheme.colorScheme.primary else Color.Transparent,
+                                shape = RoundedCornerShape(10.dp),
+                            )
+                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                    ) {
+                        Text(
+                            text = subtitle,
+                            style = MaterialTheme.typography.bodyLarge.copy(
+                                fontSize = 16.sp,
+                                color = Color.White.copy(alpha = 0.6f)
+                            ),
+                        )
+                    }
                 }
             }
 
@@ -221,10 +265,23 @@ fun DetailScreen(
             ) {
                 // 【核心修改】海报在详情页作为静态纯展示元素，不再让其接收遥控器焦点，解决焦点向左移动卡死的致命Bug
                 Card(
+                    onClick = { executePlay(selectedEpisodeIndex) },
                     shape = RoundedCornerShape(16.dp),
                     modifier = Modifier
                         .width(220.dp)
                         .aspectRatio(0.7f)
+                        .focusRequester(posterFocusRequester)
+                        .focusable()
+                        .onFocusChanged { posterFocused = it.isFocused }
+                        .focusProperties {
+                            down = titleFocusRequester
+                            right = playFocusRequester
+                        }
+                        .border(
+                            width = if (posterFocused) 2.dp else 0.dp,
+                            color = if (posterFocused) MaterialTheme.colorScheme.primary else Color.Transparent,
+                            shape = RoundedCornerShape(16.dp),
+                        )
                         .shadow(16.dp, shape = RoundedCornerShape(16.dp)),
                     colors = CardDefaults.cardColors(containerColor = Color(0xFF161616))
                 ) {
@@ -286,6 +343,7 @@ fun DetailScreen(
                         .height(54.dp)
                         .width(260.dp)
                         .focusRequester(playFocusRequester)
+                        .focusProperties { up = descriptionFocusRequester }
                         .onFocusChanged { playButtonFocused = it.isFocused }, // 页面打开后原生落焦于此
                     onClick = { executePlay(selectedEpisodeIndex) },
                 )
