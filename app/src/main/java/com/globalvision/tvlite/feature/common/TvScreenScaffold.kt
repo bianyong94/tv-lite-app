@@ -25,9 +25,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
+import com.globalvision.tvlite.ui.theme.TvBackground
 import com.globalvision.tvlite.ui.theme.TvBackgroundElevated
 import com.globalvision.tvlite.ui.theme.TvDivider
-import com.globalvision.tvlite.ui.theme.TvFocusBorder
 
 @Composable
 fun TvScreenScaffold(
@@ -49,9 +49,10 @@ fun TvScreenScaffold(
                 .background(
                     Brush.verticalGradient(
                         colors = listOf(
-                            MaterialTheme.colorScheme.background,
-                            TvBackgroundElevated,
-                            MaterialTheme.colorScheme.background,
+                            Color(0xFF0B1426),
+                            Color(0xFF10203A),
+                            Color(0xFF142946),
+                            Color(0xFF0E1D34),
                         ),
                     ),
                 )

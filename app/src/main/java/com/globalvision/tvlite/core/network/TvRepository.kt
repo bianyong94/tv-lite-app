@@ -1,28 +1,33 @@
 package com.globalvision.tvlite.core.network
 
+import android.content.Context
 import android.util.Log
 import com.globalvision.tvlite.core.model.*
+import kotlinx.coroutines.async
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
-import java.security.cert.CertificateNotYetValidException
 import java.util.concurrent.ConcurrentHashMap
 
 class TvRepository(
-    private val api: TvApiClient = TvApiClient(),
+    context: Context? = null,
+    private val api: TvApiClient = TvApiClient(context),
 ) {
     @Volatile
     private var homeFeedCache: TvHomeFeed? = null
-    @Volatile
-    private var homeFeedDiagnostic: HomeFeedDiagnostic? = null
     @Volatile
     private var searchRankingCache: List<TvSearchKeywordGroup>? = null
     @Volatile
     private var searchLatelyWordsCache: List<TvSearchKeywordItem>? = null
 
+    private val detailCache = ConcurrentHashMap<String, TvMovieDetail>()
+    private val posterFallbackCache = ConcurrentHashMap<String, String>()
+    private val missingPosterFallbackIds = ConcurrentHashMap.newKeySet<String>()
+    private val episodesCache = ConcurrentHashMap<EpisodeCacheKey, List<TvEpisode>>()
     private val screenMoviesPageCache = ConcurrentHashMap<ScreenMoviesQuery, ConcurrentHashMap<Int, List<TvPosterItem>>>()
     private val screenMoviesStateCache = ConcurrentHashMap<ScreenMoviesQuery, ScreenMoviesState>()
 
@@ -31,45 +36,62 @@ class TvRepository(
             Log.d(TAG, "home feed cache hit")
             return@withContext it
         }
-        val config = try {
-            fetchAppConfig()
-        } catch (throwable: Throwable) {
-            Log.e(TAG, "app config request failed", throwable)
-            emptyConfig()
-        }
-        var recommendFailure: Throwable? = null
-        val recommend = try {
-            api.get("/movie/index_recommend")
-        } catch (throwable: Throwable) {
-            recommendFailure = throwable
-            Log.e(TAG, "home recommend request failed", throwable)
-            null
+        val (config, recommend) = supervisorScope {
+            val configDeferred = async {
+                try {
+                    fetchAppConfig()
+                } catch (throwable: Throwable) {
+                    Log.e(TAG, "app config request failed", throwable)
+                    emptyConfig()
+                }
+            }
+            val recommendDeferred = async {
+                try {
+                    api.get("/movie/index_recommend")
+                } catch (throwable: Throwable) {
+                    Log.e(TAG, "home recommend request failed", throwable)
+                    null
+                }
+            }
+            configDeferred.await() to recommendDeferred.await()
         }
         if (recommend == null) {
             Log.w(TAG, "home recommend request failed, using sample feed")
-            homeFeedDiagnostic = buildHomeFeedDiagnostic(recommendFailure)
             return@withContext sampleHomeFeed(config).also {
                 homeFeedCache = it
             }
         }
         val feed = mapHomeFeed(config, recommend)
-        homeFeedDiagnostic = null
         Log.d(TAG, "home feed loaded: nav=${feed.config.topNav.size}, banners=${feed.banners.size}, sections=${feed.sections.size}")
         homeFeedCache = feed
         feed
     }
 
     fun peekHomeFeed(): TvHomeFeed? = homeFeedCache
-    fun peekHomeFeedDiagnostic(): HomeFeedDiagnostic? = homeFeedDiagnostic
 
     suspend fun search(keyword: String, page: Int = 1): TvSearchResult = withContext(Dispatchers.IO) {
-        val response = api.get("/movie/search", mapOf("keyword" to keyword, "page" to page, "res_type" to "by_movie_name"))
+        val response = api.get(
+            "/movie/search",
+            mapOf(
+                "keyword" to keyword,
+                "page" to page,
+                "pageSize" to SEARCH_PAGE_SIZE,
+                "res_type" to "by_movie_name",
+            ),
+        )
         val data = response.optJSONObject("data") ?: JSONObject()
+        val resolvedPage = data.optInt("page", page).coerceAtLeast(1)
+        val resolvedPageSize = data.optInt("pageSize", SEARCH_PAGE_SIZE).coerceAtLeast(SEARCH_PAGE_SIZE)
         val result = TvSearchResult(
             items = data.optJSONArray("list").toPosterItems(),
+            page = resolvedPage,
+            pageSize = resolvedPageSize,
             total = data.optInt("total", 0),
         )
-        Log.d(TAG, "search loaded: keyword=$keyword page=$page total=${result.total} items=${result.items.size}")
+        Log.d(
+            TAG,
+            "search loaded: keyword=$keyword page=${result.page} pageSize=${result.pageSize} total=${result.total} items=${result.items.size}",
+        )
         result
     }
 
@@ -214,6 +236,10 @@ class TvRepository(
     }
 
     suspend fun getDetail(id: String): TvMovieDetail = withContext(Dispatchers.IO) {
+        detailCache[id]?.let {
+            Log.d(TAG, "detail cache hit: id=$id")
+            return@withContext it
+        }
         val response = api.get("/movie/detail", mapOf("id" to id))
         val data = response.optJSONObject("data") ?: JSONObject()
         val detail = mapDetail(data)
@@ -234,12 +260,35 @@ class TvRepository(
                 }
             },
         )
+        detailCache[id] = detail
         detail
     }
 
+    suspend fun getPosterFallbackUrl(movieId: String): String = withContext(Dispatchers.IO) {
+        if (movieId.isBlank()) return@withContext ""
+        posterFallbackCache[movieId]?.let { return@withContext it }
+        if (missingPosterFallbackIds.contains(movieId)) return@withContext ""
+
+        val fallbackUrl = runCatching { getDetail(movieId).posterUrl.trim() }
+            .getOrDefault("")
+        if (fallbackUrl.isBlank()) {
+            missingPosterFallbackIds += movieId
+            return@withContext ""
+        }
+        posterFallbackCache[movieId] = fallbackUrl
+        fallbackUrl
+    }
+
     suspend fun getEpisodes(movieId: String, fromCode: String): List<TvEpisode> = withContext(Dispatchers.IO) {
+        val cacheKey = EpisodeCacheKey(movieId = movieId, fromCode = fromCode)
+        episodesCache[cacheKey]?.let {
+            Log.d(TAG, "episodes cache hit: movieId=$movieId fromCode=$fromCode size=${it.size}")
+            return@withContext it
+        }
         val response = api.get("/movie_addr/list", mapOf("movie_id" to movieId, "from_code" to fromCode))
-        response.optJSONArray("data").toEpisodes(fromCode)
+        response.optJSONArray("data").toEpisodes(fromCode).also { episodes ->
+            episodesCache[cacheKey] = episodes
+        }
     }
 
     suspend fun resolveEpisodeUrl(episode: TvEpisode): String = withContext(Dispatchers.IO) {
@@ -273,12 +322,6 @@ class TvRepository(
 
     private fun emptyConfig(): TvAppConfig = TvAppConfig()
 
-    data class HomeFeedDiagnostic(
-        val title: String,
-        val message: String,
-        val isUsingSampleData: Boolean = false,
-    )
-
     data class ScreenMoviesState(
         val items: List<TvPosterItem>,
         val nextPage: Int,
@@ -291,6 +334,11 @@ class TvRepository(
         val classValue: String,
         val area: String,
         val year: String,
+    )
+
+    private data class EpisodeCacheKey(
+        val movieId: String,
+        val fromCode: String,
     )
 
     private fun mapConfig(payload: JSONObject): TvAppConfig {
@@ -368,7 +416,6 @@ class TvRepository(
         return when {
             value.isBlank() -> ""
             value.startsWith("//") -> "https:$value"
-            value.startsWith("http://") -> value.replace("http://", "https://")
             else -> value
         }
     }
@@ -543,30 +590,6 @@ class TvRepository(
         }
     }
 
-    private fun buildHomeFeedDiagnostic(throwable: Throwable?): HomeFeedDiagnostic {
-        if (throwable.findCause<CertificateNotYetValidException>() != null) {
-            return HomeFeedDiagnostic(
-                title = "当前显示演示数据",
-                message = "电视模拟器系统时间偏早，HTTPS 证书尚未生效。请在模拟器中同步日期时间后重新打开应用。",
-                isUsingSampleData = true,
-            )
-        }
-
-        if (throwable.findCause<javax.net.ssl.SSLHandshakeException>() != null) {
-            return HomeFeedDiagnostic(
-                title = "当前显示演示数据",
-                message = "首页接口的 HTTPS 校验失败。请优先检查电视模拟器的系统时间和证书链状态。",
-                isUsingSampleData = true,
-            )
-        }
-
-        return HomeFeedDiagnostic(
-            title = "当前显示演示数据",
-            message = "首页接口暂时不可用，应用已切换到本地演示内容。",
-            isUsingSampleData = true,
-        )
-    }
-
     private fun isAdvertisementGroup(group: JSONObject): Boolean {
         val layout = group.optString("layout")
         val title = group.optString("title")
@@ -715,6 +738,7 @@ class TvRepository(
 
     private companion object {
         const val TAG = "TvRepository"
+        const val SEARCH_PAGE_SIZE = 30
     }
 
     private suspend fun resolveEpisodeUrlInternal(episode: TvEpisode): String {

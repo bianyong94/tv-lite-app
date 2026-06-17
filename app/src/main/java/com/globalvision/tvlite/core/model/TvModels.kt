@@ -71,8 +71,25 @@ data class TvMovieDetail(
     val sources: List<TvPlaySource> = emptyList(),
 )
 
+data class TvPlaybackHistoryEntry(
+    val movieId: String,
+    val title: String,
+    val posterUrl: String,
+    val year: String = "",
+    val category: String = "",
+    val remark: String = "",
+    val sourceIndex: Int = 0,
+    val sourceName: String = "",
+    val episodeIndex: Int = 0,
+    val episodeName: String = "",
+    val positionMs: Long = 0L,
+    val updatedAt: Long = 0L,
+)
+
 data class TvSearchResult(
     val items: List<TvPosterItem>,
+    val page: Int = 1,
+    val pageSize: Int = 0,
     val total: Int = 0,
 )
 

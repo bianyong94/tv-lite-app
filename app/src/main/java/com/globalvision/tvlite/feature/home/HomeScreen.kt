@@ -32,6 +32,7 @@ import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -46,8 +47,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -72,22 +73,24 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import coil.compose.AsyncImage
+import androidx.compose.ui.zIndex
 import com.globalvision.tvlite.core.model.TvFilterGroup
 import com.globalvision.tvlite.core.model.TvHomeFeed
 import com.globalvision.tvlite.core.model.TvNavItem
 import com.globalvision.tvlite.core.model.TvPosterItem
 import com.globalvision.tvlite.core.network.TvRepository
-import com.globalvision.tvlite.core.network.TvRepository.HomeFeedDiagnostic
 import com.globalvision.tvlite.feature.common.consumeRepeatedDpadEvents
 import com.globalvision.tvlite.feature.common.isRepeatedDpadEvent
 import com.globalvision.tvlite.feature.common.TvFeedbackPanel
 import com.globalvision.tvlite.feature.common.TvLoadingPanel
+import com.globalvision.tvlite.feature.common.TvPosterImage
 import com.globalvision.tvlite.feature.common.TvScreenScaffold
 import com.globalvision.tvlite.feature.common.LocalTvStatusHostState
+import com.globalvision.tvlite.feature.common.tvFocusBorder
 import com.globalvision.tvlite.ui.theme.rememberTvLayoutMetrics
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -107,13 +110,13 @@ private enum class HomeFocusZone {
 fun HomeScreen(
     repository: TvRepository,
     onSearch: () -> Unit,
+    onHistory: () -> Unit,
     onOpenDetail: (String) -> Unit,
 ) {
     val layout = rememberTvLayoutMetrics()
     val statusHost = LocalTvStatusHostState.current
     val tag = "HomeScreen"
     var feedState by remember { mutableStateOf<TvHomeFeed?>(null) }
-    var feedDiagnostic by remember { mutableStateOf<HomeFeedDiagnostic?>(null) }
     var loadingFeed by remember { mutableStateOf(true) }
     var activeNavId by rememberSaveable { mutableStateOf(0) }
     val filtersByNavId = remember { mutableStateMapOf<Int, TopicFilters>() }
@@ -134,13 +137,13 @@ fun HomeScreen(
     val gridEntryFocusRequester = remember { FocusRequester() }
     val gridState = rememberLazyGridState()
     val scope = rememberCoroutineScope()
-
     val navItems = remember(feedState) {
         buildHomeNavItems(feedState?.config?.topNav.orEmpty())
     }
     val activeFilterGroup = remember(feedState, activeNavId) {
         feedState?.config?.filterGroups?.firstOrNull { it.id == activeNavId }
     }
+    val hasFilterPanel = activeNavId > 0 && activeFilterGroup != null
     val topicFilters = if (activeNavId == 0) {
         TopicFilters()
     } else {
@@ -196,7 +199,6 @@ fun HomeScreen(
     LaunchedEffect(Unit) {
         repository.peekHomeFeed()?.let {
             feedState = it
-            feedDiagnostic = repository.peekHomeFeedDiagnostic()
             loadingFeed = false
             return@LaunchedEffect
         }
@@ -206,7 +208,6 @@ fun HomeScreen(
         } catch (_: Throwable) {
             null
         }
-        feedDiagnostic = repository.peekHomeFeedDiagnostic()
         loadingFeed = false
     }
 
@@ -390,6 +391,11 @@ fun HomeScreen(
                         },
                     )
                 }
+
+                HistoryAction(
+                    onHistory = onHistory,
+                    onFocused = { focusZone = HomeFocusZone.Sidebar },
+                )
             }
 
             // ================= 右侧内容主区域 =================
@@ -400,7 +406,7 @@ fun HomeScreen(
                     .focusGroup(),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                if (activeNavId > 0 && activeFilterGroup != null) {
+                if (hasFilterPanel) {
                     FilterPanel(
                         filterGroup = activeFilterGroup,
                         filters = topicFilters,
@@ -445,6 +451,7 @@ fun HomeScreen(
                         itemsIndexed(contentItems, key = { _, item -> item.id }) { index, item ->
                             val gridTopUpTarget = if (activeNavId == 0) navFocusRequester else filterExitFocusRequester
                             CompactPosterCard(
+                                repository = repository,
                                 item = item,
                                 modifier = when {
                                     index == 0 -> Modifier
@@ -496,6 +503,8 @@ private data class FilterOption(
     val label: String,
     val value: String,
 )
+
+private const val HomePosterFocusedScale = 1.0f
 
 @Composable
 private fun ExitConfirmDialog(onDismiss: () -> Unit, onConfirm: () -> Unit) {
@@ -564,6 +573,55 @@ private fun SearchAction(
 }
 
 @Composable
+private fun HistoryAction(
+    onHistory: () -> Unit,
+    modifier: Modifier = Modifier,
+    onFocused: () -> Unit = {},
+) {
+    var focused by remember { mutableStateOf(false) }
+    val shape = RoundedCornerShape(14.dp)
+    val scale by animateFloatAsState(
+        targetValue = if (focused) 1.12f else 1f,
+        animationSpec = spring(dampingRatio = 0.76f, stiffness = 380f),
+        label = "home_history_scale",
+    )
+
+    Card(
+        onClick = onHistory,
+        colors = CardDefaults.cardColors(
+            containerColor = if (focused) Color.White else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f),
+            contentColor = if (focused) Color.Black else Color.White,
+        ),
+        shape = shape,
+        modifier = modifier
+            .consumeRepeatedDpadEvents()
+            .size(50.dp)
+            .onFocusChanged {
+                focused = it.isFocused
+                if (it.isFocused) onFocused()
+            }
+            .shadow(
+                elevation = if (focused) 8.dp else 0.dp,
+                shape = shape,
+                ambientColor = Color.Black.copy(alpha = 0.4f),
+                spotColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.3f),
+            )
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+            },
+    ) {
+        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Icon(
+                imageVector = Icons.Default.History,
+                contentDescription = "历史记录",
+                modifier = Modifier.size(26.dp),
+            )
+        }
+    }
+}
+
+@Composable
 private fun SidebarTab(
     text: String,
     selected: Boolean,
@@ -613,7 +671,7 @@ private fun SidebarTab(
                 scaleY = scale
             },
     ) {
-        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.CenterStart) {
+        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Text(
                 text = text,
                 // 全局调大 4K 上的字体
@@ -621,7 +679,8 @@ private fun SidebarTab(
                     fontWeight = if (selected || focused) FontWeight.Bold else FontWeight.Medium,
                     fontSize = 17.sp 
                 ),
-                modifier = Modifier.padding(start = 16.dp),
+                modifier = Modifier.fillMaxWidth(),
+                textAlign = TextAlign.Center,
                 maxLines = 1,
             )
         }
@@ -638,7 +697,6 @@ private fun FilterPanel(
     onChange: (TopicFilters) -> Unit,
     onFocused: () -> Unit = {},
 ) {
-    // 摒弃杂乱组合，对筛选容器进行统一约束
     Column(
         verticalArrangement = Arrangement.spacedBy(6.dp),
         modifier = Modifier.fillMaxWidth()
@@ -818,6 +876,7 @@ private fun FilterItemChip(
 
 @Composable
 private fun CompactPosterCard(
+    repository: TvRepository,
     item: TvPosterItem,
     modifier: Modifier = Modifier,
     onClick: () -> Unit,
@@ -827,7 +886,7 @@ private fun CompactPosterCard(
     val shape = RoundedCornerShape(14.dp) // 更圆润的外观
     
     val scale by animateFloatAsState(
-        targetValue = if (focused) 1.03f else 1f,
+        targetValue = if (focused) HomePosterFocusedScale else 1f,
         animationSpec = spring(dampingRatio = 0.78f, stiffness = 380f),
         label = "compact_poster_scale",
     )
@@ -835,6 +894,7 @@ private fun CompactPosterCard(
     Column(
         modifier = modifier
             .consumeRepeatedDpadEvents()
+            .zIndex(if (focused) 1f else 0f)
             .onFocusChanged {
                 focused = it.isFocused
                 if (it.isFocused) onFocused()
@@ -843,7 +903,7 @@ private fun CompactPosterCard(
                 scaleX = scale
                 scaleY = scale
             }
-            .padding(2.dp)
+            .padding(2.dp),
     ) {
         // 海报容器
         Card(
@@ -851,15 +911,23 @@ private fun CompactPosterCard(
             shape = shape,
             modifier = Modifier
                 .fillMaxWidth()
-                .aspectRatio(0.82f),
+                .aspectRatio(0.82f)
+                .shadow(
+                    elevation = if (focused) 10.dp else 0.dp,
+                    shape = shape,
+                    ambientColor = Color.Black.copy(alpha = 0.45f),
+                    spotColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.25f),
+                )
+                .tvFocusBorder(focused = focused, shape = shape, width = 2.dp, unfocusedWidth = 0.dp),
             colors = CardDefaults.cardColors(containerColor = Color(0xFF1F1F1F)),
         ) {
             Box(modifier = Modifier.fillMaxSize()) {
-                AsyncImage(
-                    model = item.posterUrl.takeIf { it.isNotBlank() },
+                TvPosterImage(
+                    posterUrl = item.posterUrl,
                     contentDescription = item.title,
-                    contentScale = ContentScale.Crop,
                     modifier = Modifier.fillMaxSize(),
+                    movieId = item.id,
+                    repository = repository,
                 )
                 
                 // 遮罩渐变层增加深邃度

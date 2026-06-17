@@ -3,6 +3,7 @@ package com.globalvision.tvlite.core.player
 import android.content.Context
 import android.net.Uri
 import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 
@@ -38,6 +39,20 @@ class TvPlayerController(context: Context) {
             .let { if (duration > 0L) it.coerceAtMost(duration) else it }
         player.seekTo(target)
     }
+
+    fun seekTo(positionMs: Long) {
+        val duration = durationMs()
+        val target = positionMs
+            .coerceAtLeast(0L)
+            .let { if (duration > 0L) it.coerceAtMost(duration) else it }
+        player.seekTo(target)
+    }
+
+    fun setPlaybackSpeed(speed: Float) {
+        player.setPlaybackParameters(PlaybackParameters(speed))
+    }
+
+    fun playbackSpeed(): Float = player.playbackParameters.speed
 
     fun isPlaying(): Boolean = player.isPlaying
 

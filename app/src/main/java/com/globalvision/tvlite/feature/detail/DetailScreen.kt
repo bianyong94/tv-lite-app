@@ -4,7 +4,6 @@ import android.util.Log
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.focusable
 import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -32,7 +31,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -61,14 +59,16 @@ import com.globalvision.tvlite.feature.common.TvLoadingPanel
 import com.globalvision.tvlite.feature.common.TvScreenScaffold
 import com.globalvision.tvlite.feature.common.LocalTvStatusHostState
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 
 @Composable
 fun DetailScreen(
     repository: TvRepository,
     movieId: String,
+    initialSourceIndex: Int = 0,
+    initialEpisodeIndex: Int = 0,
+    initialPositionMs: Long = 0L,
     onBack: () -> Unit,
-    onPlay: (title: String, movieId: String, sourceIndex: Int, episodeIndex: Int) -> Unit,
+    onPlay: (title: String, movieId: String, sourceIndex: Int, episodeIndex: Int, positionMs: Long) -> Unit,
 ) {
     val statusHost = LocalTvStatusHostState.current
     val tag = "DetailScreen"
@@ -78,18 +78,11 @@ fun DetailScreen(
     var selectedEpisodeIndex by rememberSaveable(movieId) { mutableStateOf(0) }
     val episodesBySource = remember(movieId) { mutableStateMapOf<String, List<TvEpisode>>() }
     var episodesLoading by remember(movieId) { mutableStateOf(false) }
-    val coroutineScope = rememberCoroutineScope()
     
-    // 页面核心首焦Requester
     val playFocusRequester = remember { FocusRequester() }
     val posterFocusRequester = remember { FocusRequester() }
-    val titleFocusRequester = remember { FocusRequester() }
-    val descriptionFocusRequester = remember { FocusRequester() }
     val scrollState = rememberScrollState()
-    var playButtonFocused by remember { mutableStateOf(false) }
     var posterFocused by remember { mutableStateOf(false) }
-    var titleFocused by remember { mutableStateOf(false) }
-    var descriptionFocused by remember { mutableStateOf(false) }
 
     LaunchedEffect(movieId) {
         Log.d(tag, "load detail start: movieId=$movieId")
@@ -101,17 +94,15 @@ fun DetailScreen(
             null
         }
         loading = false
-        selectedSourceIndex = 0
-        selectedEpisodeIndex = 0
+        selectedSourceIndex = initialSourceIndex.coerceAtLeast(0)
+        selectedEpisodeIndex = initialEpisodeIndex.coerceAtLeast(0)
         episodesBySource.clear()
     }
 
-    LaunchedEffect(detail) {
-        if (detail != null) {
-            // 进入页面后，强控焦点精准落到“播放按钮”上
-            delay(32)
-            playFocusRequester.requestFocus()
-        }
+    LaunchedEffect(detail?.id) {
+        if (detail == null) return@LaunchedEffect
+        delay(32)
+        posterFocusRequester.requestFocus()
     }
 
     if (loading && detail == null) {
@@ -140,15 +131,7 @@ fun DetailScreen(
     val currentEpisode = sourceEpisodes.getOrNull(safeEpisodeIndex)
     val playbackEpisode = currentEpisode ?: sourceEpisodes.firstOrNull() ?: currentSource?.episodes?.firstOrNull()
 
-    BackHandler {
-        if (playButtonFocused) {
-            onBack()
-        } else {
-            coroutineScope.launch {
-                playFocusRequester.requestFocus()
-            }
-        }
-    }
+    BackHandler(onBack = onBack)
 
     LaunchedEffect(movie.id, currentSource?.code) {
         val source = currentSource ?: return@LaunchedEffect
@@ -158,8 +141,13 @@ fun DetailScreen(
         } catch (throwable: Throwable) {
             emptyList()
         }
-        episodesBySource[source.code] = if (fetched.isNotEmpty()) fetched else source.episodes
-        selectedEpisodeIndex = 0
+        val resolvedEpisodes = if (fetched.isNotEmpty()) fetched else source.episodes
+        episodesBySource[source.code] = resolvedEpisodes
+        selectedEpisodeIndex = if (resolvedEpisodes.isEmpty()) {
+            0
+        } else {
+            selectedEpisodeIndex.coerceIn(0, resolvedEpisodes.lastIndex)
+        }
         episodesLoading = false
     }
 
@@ -170,7 +158,16 @@ fun DetailScreen(
         if (episodes.isEmpty()) return
         val targetEpisode = episodes.getOrNull(episodeIdx.coerceIn(0, episodes.lastIndex)) ?: return
         statusHost?.show("开始播放", "正在进入 ${source.name} · ${targetEpisode.name}")
-        onPlay(movie.title, movie.id, safeSourceIndex, episodes.indexOf(targetEpisode).coerceAtLeast(0))
+        val targetEpisodeIndex = episodes.indexOf(targetEpisode).coerceAtLeast(0)
+        val startPositionMs = if (
+            safeSourceIndex == initialSourceIndex &&
+            targetEpisodeIndex == initialEpisodeIndex
+        ) {
+            initialPositionMs
+        } else {
+            0L
+        }
+        onPlay(movie.title, movie.id, safeSourceIndex, targetEpisodeIndex, startPositionMs)
     }
 
     TvScreenScaffold(
@@ -199,61 +196,27 @@ fun DetailScreen(
                         ),
                     )
                 }
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .focusRequester(titleFocusRequester)
-                        .focusable()
-                        .onFocusChanged { titleFocused = it.isFocused }
-                        .focusProperties {
-                            up = posterFocusRequester
-                            down = descriptionFocusRequester
-                        }
-                        .border(
-                            width = if (titleFocused) 2.dp else 0.dp,
-                            color = if (titleFocused) MaterialTheme.colorScheme.primary else Color.Transparent,
-                            shape = RoundedCornerShape(10.dp),
-                        )
-                        .padding(horizontal = 8.dp, vertical = 4.dp),
-                ) {
-                    Text(
-                        text = movie.title,
-                        style = MaterialTheme.typography.headlineLarge.copy(
-                            fontSize = 38.sp,
-                            fontWeight = FontWeight.ExtraBold
-                        ),
-                    )
-                }
+                Text(
+                    text = movie.title,
+                    style = MaterialTheme.typography.headlineLarge.copy(
+                        fontSize = 38.sp,
+                        fontWeight = FontWeight.ExtraBold
+                    ),
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                )
                 val subtitle = listOf(
                     movie.remarks,
                     movie.actor.takeIf { it.isNotBlank() }?.let { "主演：$it" },
                 ).filterNotNull().joinToString("    ")
                 if (subtitle.isNotBlank()) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .focusRequester(descriptionFocusRequester)
-                            .focusable()
-                            .onFocusChanged { descriptionFocused = it.isFocused }
-                            .focusProperties {
-                                up = titleFocusRequester
-                                down = playFocusRequester
-                            }
-                            .border(
-                                width = if (descriptionFocused) 2.dp else 0.dp,
-                                color = if (descriptionFocused) MaterialTheme.colorScheme.primary else Color.Transparent,
-                                shape = RoundedCornerShape(10.dp),
-                            )
-                            .padding(horizontal = 8.dp, vertical = 4.dp),
-                    ) {
-                        Text(
-                            text = subtitle,
-                            style = MaterialTheme.typography.bodyLarge.copy(
-                                fontSize = 16.sp,
-                                color = Color.White.copy(alpha = 0.6f)
-                            ),
-                        )
-                    }
+                    Text(
+                        text = subtitle,
+                        style = MaterialTheme.typography.bodyLarge.copy(
+                            fontSize = 16.sp,
+                            color = Color.White.copy(alpha = 0.6f)
+                        ),
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                    )
                 }
             }
 
@@ -271,18 +234,22 @@ fun DetailScreen(
                         .width(220.dp)
                         .aspectRatio(0.7f)
                         .focusRequester(posterFocusRequester)
-                        .focusable()
                         .onFocusChanged { posterFocused = it.isFocused }
                         .focusProperties {
-                            down = titleFocusRequester
+                            down = playFocusRequester
                             right = playFocusRequester
                         }
                         .border(
-                            width = if (posterFocused) 2.dp else 0.dp,
-                            color = if (posterFocused) MaterialTheme.colorScheme.primary else Color.Transparent,
+                            width = if (posterFocused) 3.dp else 0.dp,
+                            color = if (posterFocused) Color.White else Color.Transparent,
                             shape = RoundedCornerShape(16.dp),
                         )
-                        .shadow(16.dp, shape = RoundedCornerShape(16.dp)),
+                        .shadow(
+                            elevation = if (posterFocused) 22.dp else 16.dp,
+                            shape = RoundedCornerShape(16.dp),
+                            ambientColor = Color.Black.copy(alpha = 0.45f),
+                            spotColor = if (posterFocused) MaterialTheme.colorScheme.primary.copy(alpha = 0.28f) else Color.Black.copy(alpha = 0.18f),
+                        ),
                     colors = CardDefaults.cardColors(containerColor = Color(0xFF161616))
                 ) {
                     AsyncImage(
@@ -339,14 +306,13 @@ fun DetailScreen(
                         text = if (playbackEpisode != null) "立即播放: ${playbackEpisode.name}" else "开始播放",
                         selected = true,
                         modifier = Modifier
-                        .align(Alignment.Start)
-                        .height(54.dp)
-                        .width(260.dp)
-                        .focusRequester(playFocusRequester)
-                        .focusProperties { up = descriptionFocusRequester }
-                        .onFocusChanged { playButtonFocused = it.isFocused }, // 页面打开后原生落焦于此
-                    onClick = { executePlay(selectedEpisodeIndex) },
-                )
+                            .align(Alignment.Start)
+                            .height(54.dp)
+                            .width(260.dp)
+                            .focusRequester(playFocusRequester)
+                            .focusProperties { up = posterFocusRequester },
+                        onClick = { executePlay(selectedEpisodeIndex) },
+                    )
                 }
             }
 
@@ -374,6 +340,7 @@ fun DetailScreen(
                                 text = source.name,
                                 selected = index == safeSourceIndex,
                                 minWidth = 110.dp,
+                                keepVisibleOnFocus = false,
                                 onClick = {
                                     selectedSourceIndex = index
                                     selectedEpisodeIndex = 0
@@ -427,6 +394,7 @@ fun DetailScreen(
                                 text = episode.name,
                                 selected = index == safeEpisodeIndex,
                                 minWidth = 88.dp,
+                                keepVisibleOnFocus = false,
                                 onClick = {
                                     selectedEpisodeIndex = index
                                     executePlay(index)
