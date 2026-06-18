@@ -133,6 +133,12 @@ fun PlayerScreen(
     var waitingForPlayableSource by remember { mutableStateOf(false) }
     var initialPlaybackTriggered by rememberSaveable(movieId) { mutableStateOf(false) }
     var playAttemptToken by remember { mutableIntStateOf(0) }
+    var playbackLoadStartedAtMs by remember { mutableStateOf(0L) }
+    var readyLoggedForAttempt by remember { mutableIntStateOf(0) }
+    var seekStartedAtMs by remember { mutableStateOf(0L) }
+    var currentPlaybackEpisode by remember { mutableStateOf<TvEpisode?>(null) }
+    var parseFallbackAllowed by remember { mutableStateOf(false) }
+    var parseFallbackAttempted by remember { mutableStateOf(false) }
     var detail by remember(movieId) { mutableStateOf<TvMovieDetail?>(null) }
     var sources by remember(movieId) { mutableStateOf<List<TvPlaySource>>(emptyList()) }
     val episodeCache = remember(movieId) { mutableStateMapOf<String, List<TvEpisode>>() }
@@ -202,11 +208,23 @@ fun PlayerScreen(
         playbackSpeed = controller.playbackSpeed()
     }
 
-    fun beginPlayback(playUrl: String, loadingText: String = "正在加载...") {
+    fun beginPlayback(
+        playUrl: String,
+        loadingText: String = "正在加载...",
+        episode: TvEpisode? = null,
+        allowParseFallback: Boolean = true,
+    ) {
         errorMessage = null
         loadingMessage = loadingText
         waitingForPlayableSource = true
+        playbackLoadStartedAtMs = SystemClock.uptimeMillis()
+        currentPlaybackEpisode = episode
+        parseFallbackAllowed = allowParseFallback
+        parseFallbackAttempted = false
         playAttemptToken += 1
+        readyLoggedForAttempt = 0
+        seekStartedAtMs = 0L
+        Log.d(tag, "player prepare start: episode=${episode?.name.orEmpty()} allowParseFallback=$allowParseFallback url=${playUrl.take(96)}")
         controller.play(playUrl)
     }
 
@@ -279,12 +297,17 @@ fun PlayerScreen(
         if (episodes.isEmpty()) return false
         val safeEpisode = targetEpisodeIndex.coerceIn(0, episodes.lastIndex)
         val episode = episodes.getOrNull(safeEpisode) ?: return false
+        val resolveStartedAtMs = SystemClock.uptimeMillis()
         val playUrl = try {
             repository.resolveEpisodeUrl(episode)
         } catch (throwable: Throwable) {
             ""
         }
         if (playUrl.isBlank()) return false
+        Log.d(
+            tag,
+            "episode url resolved: source=${source.name} episode=${episode.name} elapsed=${SystemClock.uptimeMillis() - resolveStartedAtMs}ms url=${playUrl.take(96)}",
+        )
 
         currentSourceIndex = targetSourceIndex
         currentEpisodeIndex = safeEpisode
@@ -298,7 +321,7 @@ fun PlayerScreen(
         }
         shouldApplyPendingSeek = pendingSeekPositionMs > 0L
         statusHost?.show("开始播放", "正在呈现 ${source.name} · ${episode.name}")
-        beginPlayback(playUrl)
+        beginPlayback(playUrl, episode = episode)
         return true
     }
 
@@ -343,12 +366,36 @@ fun PlayerScreen(
                             controller.seekTo(pendingSeekPositionMs)
                             shouldApplyPendingSeek = false
                         }
+                        if (playbackState == Player.STATE_READY) {
+                            if (readyLoggedForAttempt != playAttemptToken) {
+                                readyLoggedForAttempt = playAttemptToken
+                                val elapsedMs = (SystemClock.uptimeMillis() - playbackLoadStartedAtMs)
+                                    .takeIf { playbackLoadStartedAtMs > 0L }
+                                    ?: 0L
+                                Log.d(
+                                    tag,
+                                    "player startup ready: elapsed=${elapsedMs}ms buffered=${controller.bufferedPositionMs()} duration=${controller.durationMs()}",
+                                )
+                                controller.allowAdaptiveVideoQuality()
+                            } else if (seekStartedAtMs > 0L) {
+                                val seekElapsedMs = SystemClock.uptimeMillis() - seekStartedAtMs
+                                Log.d(
+                                    tag,
+                                    "player seek ready: elapsed=${seekElapsedMs}ms position=${controller.currentPositionMs()} buffered=${controller.bufferedPositionMs()}",
+                                )
+                                seekStartedAtMs = 0L
+                            }
+                        }
                         waitingForPlayableSource = false
                         loadingMessage = null
                         errorMessage = null
                     }
                     Player.STATE_BUFFERING -> {
                         if (loadingMessage.isNullOrBlank()) loadingMessage = "正在缓冲..."
+                        Log.d(
+                            tag,
+                            "player buffering: position=${controller.currentPositionMs()} buffered=${controller.bufferedPositionMs()}",
+                        )
                     }
                 }
             }
@@ -359,6 +406,46 @@ fun PlayerScreen(
                 playbackSpeed = playbackParameters.speed
             }
             override fun onPlayerError(error: PlaybackException) {
+                val failedEpisode = currentPlaybackEpisode
+                val canTryParseFallback = parseFallbackAllowed && !parseFallbackAttempted && failedEpisode != null
+                Log.w(
+                    tag,
+                    "player error: code=${error.errorCode} canTryParseFallback=$canTryParseFallback message=${error.message}",
+                    error,
+                )
+                if (canTryParseFallback) {
+                    parseFallbackAttempted = true
+                    loadingMessage = "正在尝试兼容播放..."
+                    waitingForPlayableSource = true
+                    scope.launch {
+                        val fallbackStartedAtMs = SystemClock.uptimeMillis()
+                        val fallbackUrl = try {
+                            repository.resolveEpisodeUrlWithParseFallback(failedEpisode!!)
+                        } catch (throwable: Throwable) {
+                            Log.w(tag, "parse fallback resolve failed", throwable)
+                            ""
+                        }
+                        Log.d(
+                            tag,
+                            "parse fallback resolved: elapsed=${SystemClock.uptimeMillis() - fallbackStartedAtMs}ms url=${fallbackUrl.take(96)}",
+                        )
+                        if (fallbackUrl.isNotBlank()) {
+                            beginPlayback(
+                                playUrl = fallbackUrl,
+                                loadingText = "正在切换兼容播放...",
+                                episode = failedEpisode,
+                                allowParseFallback = false,
+                            )
+                        } else {
+                            overlayPanel = null
+                            waitingForPlayableSource = false
+                            loadingMessage = null
+                            errorMessage = "视频解码或网络异常，请尝试切换路线。"
+                            statusHost?.show("播放受阻", "当前片源不可用，请手动切换播放源。", timeoutMs = 2800L)
+                        }
+                    }
+                    return
+                }
                 overlayPanel = null
                 waitingForPlayableSource = false
                 loadingMessage = null
@@ -500,11 +587,15 @@ fun PlayerScreen(
                 }
                 when (event.key) {
                     Key.DirectionLeft -> {
+                        seekStartedAtMs = SystemClock.uptimeMillis()
+                        Log.d(tag, "player seek request: offset=-10000 position=${controller.currentPositionMs()}")
                         controller.seekBy(-10_000)
                         showSeekFeedback("后退 10 秒")
                         true
                     }
                     Key.DirectionRight -> {
+                        seekStartedAtMs = SystemClock.uptimeMillis()
+                        Log.d(tag, "player seek request: offset=10000 position=${controller.currentPositionMs()}")
                         controller.seekBy(10_000)
                         showSeekFeedback("前进 10 秒")
                         true

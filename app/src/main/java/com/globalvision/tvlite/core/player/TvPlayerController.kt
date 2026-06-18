@@ -5,16 +5,49 @@ import android.net.Uri
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.SeekParameters
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
 
+@UnstableApi
 class TvPlayerController(context: Context) {
-    val player: ExoPlayer = ExoPlayer.Builder(context).build()
+    private val trackSelector = DefaultTrackSelector(context).apply {
+        setParameters(
+            buildUponParameters()
+                .setMaxVideoBitrate(STARTUP_MAX_VIDEO_BITRATE)
+        )
+    }
+    private var startupQualityLimitEnabled = true
+
+    val player: ExoPlayer = ExoPlayer.Builder(context)
+        .setTrackSelector(trackSelector)
+        .setLoadControl(buildLoadControl())
+        .setMediaSourceFactory(buildMediaSourceFactory(context))
+        .build()
+        .apply {
+            setSeekParameters(SeekParameters.CLOSEST_SYNC)
+        }
 
     fun play(url: String) {
         if (url.isBlank()) return
+        enableStartupQualityLimit()
         player.setMediaItem(MediaItem.fromUri(Uri.parse(url)))
         player.prepare()
         player.playWhenReady = true
+    }
+
+    fun allowAdaptiveVideoQuality() {
+        if (!startupQualityLimitEnabled) return
+        startupQualityLimitEnabled = false
+        trackSelector.setParameters(
+            trackSelector.buildUponParameters()
+                .clearVideoSizeConstraints()
+                .setMaxVideoBitrate(Int.MAX_VALUE)
+        )
     }
 
     fun togglePlayPause() {
@@ -72,5 +105,50 @@ class TvPlayerController(context: Context) {
 
     fun release() {
         player.release()
+    }
+
+    private fun enableStartupQualityLimit() {
+        startupQualityLimitEnabled = true
+        trackSelector.setParameters(
+            trackSelector.buildUponParameters()
+                .setMaxVideoBitrate(STARTUP_MAX_VIDEO_BITRATE)
+        )
+    }
+
+    private companion object {
+        private const val STARTUP_MAX_VIDEO_BITRATE = 2_500_000
+
+        private fun buildLoadControl(): DefaultLoadControl {
+            return DefaultLoadControl.Builder()
+                .setBufferDurationsMs(
+                    8_000,
+                    45_000,
+                    700,
+                    1_200,
+                )
+                .setPrioritizeTimeOverSizeThresholds(true)
+                .build()
+        }
+
+        private fun buildMediaSourceFactory(context: Context): DefaultMediaSourceFactory {
+            val httpDataSourceFactory = DefaultHttpDataSource.Factory()
+                .setUserAgent(
+                    "Mozilla/5.0 (Linux; Android 13; Android TV) " +
+                        "AppleWebKit/537.36 (KHTML, like Gecko) " +
+                        "Chrome/125.0.0.0 Safari/537.36"
+                )
+                .setConnectTimeoutMs(15_000)
+                .setReadTimeoutMs(25_000)
+                .setAllowCrossProtocolRedirects(true)
+                .setDefaultRequestProperties(
+                    mapOf(
+                        "Accept" to "*/*",
+                        "Origin" to "https://bycurry.cc",
+                        "Referer" to "https://bycurry.cc/",
+                    )
+                )
+            return DefaultMediaSourceFactory(context)
+                .setDataSourceFactory(httpDataSourceFactory)
+        }
     }
 }

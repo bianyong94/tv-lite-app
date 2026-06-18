@@ -295,6 +295,10 @@ class TvRepository(
         resolveEpisodeUrlInternal(episode)
     }
 
+    suspend fun resolveEpisodeUrlWithParseFallback(episode: TvEpisode): String = withContext(Dispatchers.IO) {
+        resolveEpisodeUrlInternal(episode, forceParse = true)
+    }
+
     suspend fun isPlayableMediaUrl(url: String): Boolean = withContext(Dispatchers.IO) {
         val normalized = url.trim()
         if (normalized.isBlank()) return@withContext false
@@ -741,22 +745,22 @@ class TvRepository(
         const val SEARCH_PAGE_SIZE = 30
     }
 
-    private suspend fun resolveEpisodeUrlInternal(episode: TvEpisode): String {
+    private suspend fun resolveEpisodeUrlInternal(episode: TvEpisode, forceParse: Boolean = false): String {
         val playUrl = episode.playUrl.trim()
         val parseUrl = episode.parseUrl.trim()
 
         Log.d(
             TAG,
-            "resolve episode input: episode=${episode.name} readyToPlay=${episode.readyToPlay} playUrl=$playUrl parseUrl=$parseUrl",
+            "resolve episode input: episode=${episode.name} readyToPlay=${episode.readyToPlay} forceParse=$forceParse playUrl=$playUrl parseUrl=$parseUrl",
         )
 
-        if (parseUrl.isNotBlank()) {
+        if (!forceParse && parseUrl.isNotBlank() && looksLikePlayableUrl(parseUrl)) {
             val resolved = normalizeMediaUrl(parseUrl)
             Log.d(TAG, "resolve episode output: source=parseUrl resolved=$resolved")
             return resolved
         }
 
-        val shouldParse = !episode.readyToPlay || playUrl.startsWith("parse_") || !looksLikePlayableUrl(playUrl)
+        val shouldParse = forceParse || playUrl.startsWith("parse_") || !looksLikeDirectNetworkUrl(playUrl)
         if (!shouldParse) {
             val resolved = normalizeMediaUrl(playUrl)
             Log.d(TAG, "resolve episode output: source=playUrl resolved=$resolved")
@@ -824,6 +828,13 @@ class TvRepository(
             lower.contains(".mp4") ||
             lower.contains(".flv") ||
             lower.contains(".mkv")
+    }
+
+    private fun looksLikeDirectNetworkUrl(value: String): Boolean {
+        val normalized = value.trim()
+        if (normalized.isBlank() || normalized.startsWith("parse_")) return false
+        val lower = normalized.lowercase()
+        return lower.startsWith("http://") || lower.startsWith("https://")
     }
 
     private fun normalizeMediaUrl(value: String): String {

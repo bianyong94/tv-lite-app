@@ -7,9 +7,11 @@ import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
 import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusGroup
-import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.focusable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
@@ -25,13 +27,16 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
+import androidx.compose.foundation.lazy.itemsIndexed as lazyRowItemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -44,6 +49,7 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -72,9 +78,14 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
-import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.font.FontWeight
@@ -83,6 +94,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
+import com.globalvision.tvlite.core.local.TvRecentSearchStore
 import com.globalvision.tvlite.core.model.TvPosterItem
 import com.globalvision.tvlite.core.model.TvSearchKeywordGroup
 import com.globalvision.tvlite.core.model.TvSearchKeywordItem
@@ -125,6 +137,11 @@ private data class SearchSectionMeta(
     val subtitle: String = "",
 )
 
+private data class SearchRankingTab(
+    val index: Int,
+    val title: String,
+)
+
 @Composable
 fun SearchScreen(
     repository: TvRepository,
@@ -132,13 +149,15 @@ fun SearchScreen(
     onOpenDetail: (String) -> Unit,
 ) {
     val layout = rememberTvLayoutMetrics()
+    val context = LocalContext.current
     val statusHost = LocalTvStatusHostState.current
     val keyboardController = LocalSoftwareKeyboardController.current
+    val recentSearchStore = remember(context) { TvRecentSearchStore(context) }
     val sectionMetas = remember {
         mapOf(
-            "热搜" to SearchSectionMeta(Icons.AutoMirrored.Filled.TrendingUp, Color(0xFFFF7A45), Color(0xFFFFB347), "大家都在搜"),
             "最近搜索" to SearchSectionMeta(Icons.Filled.History, Color(0xFF7CAEFF), Color(0xFF5C8DFF), "继续浏览"),
             "搜索联想" to SearchSectionMeta(Icons.Filled.AutoAwesome, Color(0xFF72B6FF), Color(0xFF9E8BFF), "猜你想搜"),
+            "搜索推荐" to SearchSectionMeta(Icons.AutoMirrored.Filled.TrendingUp, Color(0xFFFF8C52), Color(0xFFFFB14F), "热门推荐"),
         )
     }
     var keyword by rememberSaveable { mutableStateOf("") }
@@ -158,20 +177,26 @@ fun SearchScreen(
     var pendingFocusFirstResult by remember { mutableStateOf(false) }
     val searchCache = remember { mutableStateMapOf<String, CachedSearchContent>() }
     var localRecentKeywords by remember { mutableStateOf<List<String>>(emptyList()) }
-    var serverRecentKeywords by remember { mutableStateOf<List<TvSearchKeywordItem>>(emptyList()) }
-    var rankingSections by remember { mutableStateOf<List<TvSearchKeywordGroup>>(emptyList()) }
     var autocompleteKeywords by remember { mutableStateOf<List<TvSearchKeywordItem>>(emptyList()) }
+    var rankingSections by remember { mutableStateOf<List<TvSearchKeywordGroup>>(emptyList()) }
+    var activeRankingTabIndex by rememberSaveable { mutableIntStateOf(0) }
     var shouldAnimateSearchFocus by rememberSaveable { mutableStateOf(false) }
+    val rankingTabs = remember(rankingSections) {
+        rankingSections.mapIndexed { index, group -> SearchRankingTab(index = index, title = group.title) }
+    }
+    val activeRankingItems = rankingSections.getOrNull(activeRankingTabIndex)?.items.orEmpty()
 
     val searchFieldRequester = remember { FocusRequester() }
     val firstHistoryRequester = remember { FocusRequester() }
     val firstAutocompleteRequester = remember { FocusRequester() }
     val firstResultRequester = remember { FocusRequester() }
-    val gridState = rememberLazyGridState()
-    val moduleScrollState = rememberScrollState()
+    val firstRankingTabRequester = remember { FocusRequester() }
+    val firstRankingItemRequester = remember { FocusRequester() }
+    val resultsGridState = rememberLazyGridState()
+    val rankingItemsRowState = rememberLazyListState()
     val scope = rememberCoroutineScope()
-    val rankingSectionRequesters = remember(rankingSections.size) {
-        List(rankingSections.size) { FocusRequester() }
+    val rankingTabRequesters = remember(rankingTabs.size) {
+        List(rankingTabs.size) { FocusRequester() }
     }
 
     fun applyCache(cache: CachedSearchContent) {
@@ -186,7 +211,8 @@ fun SearchScreen(
         val normalized = value.trim()
         if (normalized.isBlank()) return
         localRecentKeywords = listOf(normalized) + localRecentKeywords.filterNot { it.equals(normalized, ignoreCase = true) }
-            .take(7)
+            .take(20)
+        recentSearchStore.record(normalized)
     }
 
     fun startSearch(rawKeyword: String, forceRefresh: Boolean = false, focusFirstResult: Boolean = false) {
@@ -274,11 +300,21 @@ fun SearchScreen(
 
     LaunchedEffect(Unit) {
         initialPanelLoading = true
-        rankingSections = runCatching { repository.getSearchRanking() }
-            .getOrDefault(emptyList())
-        serverRecentKeywords = runCatching { repository.getSearchLatelyWords() }
-            .getOrDefault(emptyList())
+        localRecentKeywords = recentSearchStore.getAll()
+        rankingSections = runCatching { repository.getSearchRanking() }.getOrDefault(emptyList())
         initialPanelLoading = false
+    }
+
+    LaunchedEffect(rankingSections) {
+        if (rankingSections.isEmpty()) {
+            activeRankingTabIndex = 0
+        } else if (activeRankingTabIndex !in rankingSections.indices) {
+            activeRankingTabIndex = 0
+        }
+    }
+
+    LaunchedEffect(activeRankingTabIndex, activeRankingItems.size) {
+        rankingItemsRowState.scrollToItem(0)
     }
 
     LaunchedEffect(keyword) {
@@ -310,6 +346,7 @@ fun SearchScreen(
     LaunchedEffect(searchToken) {
         if (searchToken == 0) return@LaunchedEffect
         loading = true
+        focusedResultIndex = -1
         val normalized = pendingSearchKeyword?.trim().orEmpty()
         if (normalized.isBlank()) {
             loading = false
@@ -354,6 +391,7 @@ fun SearchScreen(
 
     LaunchedEffect(results, pendingFocusFirstResult) {
         if (pendingFocusFirstResult && results.isNotEmpty()) {
+            resultsGridState.scrollToItem(0)
             delay(32)
             firstResultRequester.requestFocus()
             focusArea = SearchFocusArea.Results
@@ -363,8 +401,8 @@ fun SearchScreen(
 
     LaunchedEffect(activeKeyword, hasMore, loading, loadingMore) {
         snapshotFlow {
-            val lastVisibleIndex = gridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
-            val totalCount = gridState.layoutInfo.totalItemsCount
+            val lastVisibleIndex = resultsGridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
+            val totalCount = resultsGridState.layoutInfo.totalItemsCount
             lastVisibleIndex to totalCount
         }.distinctUntilChanged()
             .collect { (lastVisibleIndex, totalCount) ->
@@ -393,11 +431,12 @@ fun SearchScreen(
         }
     }
 
-    val recentKeywords = remember(localRecentKeywords, serverRecentKeywords) {
-        (localRecentKeywords.map { TvSearchKeywordItem(it) } + serverRecentKeywords)
-            .filter { it.word.isNotBlank() }
-            .distinctBy { it.word.lowercase() }
-            .take(8)
+    val recentKeywords = remember(localRecentKeywords) {
+        localRecentKeywords
+            .filter { it.isNotBlank() }
+            .distinctBy { it.lowercase() }
+            .take(20)
+            .map { TvSearchKeywordItem(it) }
     }
     val isEditingNewQuery = keyword.trim().isNotBlank() && keyword.trim() != activeKeyword
 
@@ -484,10 +523,12 @@ fun SearchScreen(
                     .focusProperties {
                         when {
                             keyword.isBlank() -> {
-                                if (rankingSections.isNotEmpty()) {
-                                    down = rankingSectionRequesters.firstOrNull() ?: firstHistoryRequester
-                                } else if (recentKeywords.isNotEmpty()) {
+                                if (recentKeywords.isNotEmpty()) {
                                     down = firstHistoryRequester
+                                } else if (rankingTabs.isNotEmpty()) {
+                                    down = firstRankingTabRequester
+                                } else if (activeRankingItems.isNotEmpty()) {
+                                    down = firstRankingItemRequester
                                 }
                             }
                             isEditingNewQuery && autocompleteKeywords.isNotEmpty() -> down = firstAutocompleteRequester
@@ -503,7 +544,23 @@ fun SearchScreen(
                             shouldAnimateSearchFocus = true
                         }
                     }
-                    .onPreviewKeyEvent { event -> event.isRepeatedDpadEvent() },
+                    .onPreviewKeyEvent { event ->
+                        if (event.isRepeatedDpadEvent()) return@onPreviewKeyEvent true
+                        if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                        when (event.key) {
+                            Key.DirectionDown -> {
+                                when {
+                                    keyword.isBlank() && recentKeywords.isNotEmpty() -> firstHistoryRequester.requestFocus()
+                                    keyword.isBlank() && rankingTabs.isNotEmpty() -> firstRankingTabRequester.requestFocus()
+                                    isEditingNewQuery && autocompleteKeywords.isNotEmpty() -> firstAutocompleteRequester.requestFocus()
+                                    !isEditingNewQuery && activeKeyword.isNotBlank() && results.isNotEmpty() -> firstResultRequester.requestFocus()
+                                    else -> return@onPreviewKeyEvent false
+                                }
+                                true
+                            }
+                            else -> false
+                        }
+                    },
                 singleLine = true,
                 textStyle = MaterialTheme.typography.titleLarge.copy(
                     fontSize = 20.sp,
@@ -531,44 +588,99 @@ fun SearchScreen(
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .fillMaxHeight(0.95f)
-                            .verticalScroll(moduleScrollState)
-                            .focusGroup(),
-                        verticalArrangement = Arrangement.spacedBy(28.dp),
+                            .fillMaxHeight(0.95f),
+                        verticalArrangement = Arrangement.spacedBy(18.dp),
                     ) {
-                        rankingSections.forEachIndexed { index, section ->
-                            val currentRequester = rankingSectionRequesters.getOrNull(index)
-                            val previousRequester = if (index == 0) searchFieldRequester else rankingSectionRequesters.getOrNull(index - 1)
-                            val nextRequester = rankingSectionRequesters.getOrNull(index + 1) ?: firstHistoryRequester
+                        if (recentKeywords.isNotEmpty()) {
                             SearchHintRowSection(
-                                title = section.title,
-                                keywords = section.items,
-                                meta = sectionMetas[section.title] ?: SearchSectionMeta(
-                                    icon = Icons.Filled.LocalMovies,
-                                    accent = Color(0xFF6EA8FF),
-                                    secondaryAccent = Color(0xFF6E89FF),
-                                    subtitle = "热门推荐",
-                                ),
-                                firstRequester = currentRequester ?: firstHistoryRequester,
-                                upRequester = previousRequester,
-                                downRequester = nextRequester,
-                                isRanking = true,
+                                title = "最近搜索",
+                                keywords = recentKeywords,
+                                meta = sectionMetas.getValue("最近搜索"),
+                                firstRequester = firstHistoryRequester,
+                                upRequester = searchFieldRequester,
+                                downRequester = if (rankingTabs.isNotEmpty()) firstRankingTabRequester else null,
+                                isRanking = false,
                                 onSelect = { selected ->
                                     startSearch(selected.word, forceRefresh = true, focusFirstResult = true)
                                 },
                             )
                         }
-                        SearchHintRowSection(
-                            title = "最近搜索",
-                            keywords = recentKeywords,
-                            meta = sectionMetas.getValue("最近搜索"),
-                            firstRequester = firstHistoryRequester,
-                            upRequester = rankingSectionRequesters.lastOrNull() ?: searchFieldRequester,
-                            isRanking = false,
-                            onSelect = { selected ->
-                                startSearch(selected.word, forceRefresh = true, focusFirstResult = true)
+
+                        SearchRankingTabRow(
+                            tabs = rankingTabs,
+                            activeTabIndex = activeRankingTabIndex,
+                            requesters = rankingTabRequesters,
+                            firstRequester = firstRankingTabRequester,
+                            upRequester = if (recentKeywords.isNotEmpty()) firstHistoryRequester else searchFieldRequester,
+                            downRequester = if (activeRankingItems.isNotEmpty()) firstRankingItemRequester else null,
+                            onMoveDown = {
+                                if (activeRankingItems.isEmpty()) {
+                                    false
+                                } else {
+                                    scope.launch {
+                                        rankingItemsRowState.scrollToItem(0)
+                                        delay(16)
+                                        firstRankingItemRequester.requestFocus()
+                                    }
+                                    true
+                                }
                             },
+                            onSelect = { activeRankingTabIndex = it.index },
                         )
+
+                        when {
+                            rankingTabs.isEmpty() -> {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .weight(1f),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    TvFeedbackPanel(
+                                        title = "暂无推荐数据",
+                                        message = "当前没有获取到热搜推荐内容，可以先直接搜索。",
+                                    )
+                                }
+                            }
+                            activeRankingItems.isEmpty() -> {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .weight(1f),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    TvFeedbackPanel(
+                                        title = "当前栏目暂无数据",
+                                        message = "切换其他 tab，或者直接输入关键词搜索。",
+                                    )
+                                }
+                            }
+                            else -> {
+                                SearchHintRowSection(
+                                    title = rankingSections[activeRankingTabIndex].title,
+                                    keywords = activeRankingItems,
+                                    meta = sectionMetas.getValue("搜索推荐"),
+                                    firstRequester = firstRankingItemRequester,
+                                    upRequester = if (rankingTabs.isNotEmpty()) {
+                                        if (activeRankingTabIndex == 0) {
+                                            firstRankingTabRequester
+                                        } else {
+                                            rankingTabRequesters.getOrNull(activeRankingTabIndex) ?: firstRankingTabRequester
+                                        }
+                                    } else {
+                                        if (recentKeywords.isNotEmpty()) firstHistoryRequester else searchFieldRequester
+                                    },
+                                    isRanking = true,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .weight(1f),
+                                    rowState = rankingItemsRowState,
+                                    onSelect = { selected ->
+                                        startSearch(selected.word, forceRefresh = true, focusFirstResult = true)
+                                    },
+                                )
+                            }
+                        }
                     }
                 }
             } else {
@@ -636,11 +748,11 @@ fun SearchScreen(
                             )
 
                             LazyVerticalGrid(
-                                state = gridState,
+                                state = resultsGridState,
                                 columns = GridCells.Fixed(SearchResultsColumns),
-                                contentPadding = PaddingValues(bottom = 60.dp),
-                                horizontalArrangement = Arrangement.spacedBy(20.dp),
-                                verticalArrangement = Arrangement.spacedBy(24.dp),
+                                contentPadding = PaddingValues(bottom = 24.dp),
+                                horizontalArrangement = Arrangement.spacedBy(14.dp),
+                                verticalArrangement = Arrangement.spacedBy(14.dp),
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .weight(1f)
@@ -704,9 +816,9 @@ private fun SearchResultPosterCard(
     onClick: () -> Unit,
 ) {
     var focused by remember { mutableStateOf(false) }
-    val shape = RoundedCornerShape(22.dp)
+    val shape = RoundedCornerShape(14.dp)
     val scale by animateFloatAsState(
-        targetValue = if (focused) 1.01f else 1f,
+        targetValue = 1f,
         animationSpec = spring(dampingRatio = 0.78f, stiffness = 380f),
         label = "search_result_poster_scale",
     )
@@ -714,7 +826,6 @@ private fun SearchResultPosterCard(
     Column(
         modifier = modifier
             .consumeRepeatedDpadEvents()
-            .zIndex(if (focused) 1f else 0f)
             .onFocusChanged {
                 focused = it.isFocused
                 if (it.isFocused) onFocused()
@@ -730,15 +841,15 @@ private fun SearchResultPosterCard(
             shape = shape,
             modifier = Modifier
                 .fillMaxWidth()
-                .aspectRatio(1.48f)
+                .aspectRatio(0.82f)
                 .shadow(
-                    elevation = if (focused) 18.dp else 0.dp,
+                    elevation = if (focused) 10.dp else 0.dp,
                     shape = shape,
-                    ambientColor = if (focused) Color(0x664C94FF) else Color.Black.copy(alpha = 0.38f),
-                    spotColor = if (focused) Color(0xCC72A8FF) else Color.Black.copy(alpha = 0.20f),
+                    ambientColor = Color.Black.copy(alpha = 0.45f),
+                    spotColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.25f),
                 )
                 .tvFocusBorder(focused = focused, shape = shape, width = 2.dp, unfocusedWidth = 0.dp),
-            colors = CardDefaults.cardColors(containerColor = Color(0xFF152233)),
+            colors = CardDefaults.cardColors(containerColor = Color(0xFF1F1F1F)),
         ) {
             Box(modifier = Modifier.fillMaxSize()) {
                 TvPosterImage(
@@ -755,17 +866,17 @@ private fun SearchResultPosterCard(
                         .background(
                             Brush.verticalGradient(
                                 colors = listOf(
-                                    Color(0x140A1D38),
-                                    Color(0xA608111E),
+                                    Color.Transparent,
+                                    Color.Black.copy(alpha = 0.78f),
                                 ),
-                                startY = 120f,
+                                startY = 260f,
                             ),
                         ),
                 )
 
                 if (item.remark.isNotBlank()) {
-                    val remarkBackground = if (focused) Color(0xFFE85D3C) else Color(0xCCEA6B41)
-                    val remarkTextColor = Color.White
+                    val remarkBackground = if (focused) MaterialTheme.colorScheme.primary else Color.Black.copy(alpha = 0.65f)
+                    val remarkTextColor = if (focused) MaterialTheme.colorScheme.onPrimary else Color.White
                     Text(
                         text = item.remark,
                         style = MaterialTheme.typography.titleSmall.copy(
@@ -808,7 +919,7 @@ private fun SearchResultPosterCard(
                             text = subInfo,
                             style = MaterialTheme.typography.bodyMedium.copy(
                                 fontSize = 12.sp,
-                                color = Color.White.copy(alpha = 0.78f),
+                                color = Color.White.copy(alpha = 0.72f),
                             ),
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
@@ -829,44 +940,47 @@ private fun SearchHintRowSection(
     upRequester: FocusRequester? = null,
     downRequester: FocusRequester? = null,
     isRanking: Boolean = false,
+    modifier: Modifier = Modifier,
+    rowState: LazyListState? = null,
     onSelect: (TvSearchKeywordItem) -> Unit,
 ) {
     if (keywords.isEmpty()) return
+    val resolvedRowState = rowState ?: rememberLazyListState()
 
     Column(
         verticalArrangement = Arrangement.spacedBy(16.dp),
-        modifier = Modifier.fillMaxWidth(),
+        modifier = modifier.fillMaxWidth(),
     ) {
         SearchSectionHeader(title = title, meta = meta)
-        BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
-            val itemWidth = if (isRanking) 160.dp else 130.dp
-            val itemHeight = if (isRanking) 64.dp else 56.dp
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState())
-                    .padding(horizontal = 2.dp, vertical = 8.dp) // 增加了一点上下间距，避免发光阴影被直接切断
-                    .focusGroup(),
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                keywords.forEachIndexed { index, item ->
-                    SearchKeywordPill(
-                        item = item,
-                        meta = meta,
-                        index = index,
-                        isRanking = isRanking,
-                        itemWidth = itemWidth,
-                        itemHeight = itemHeight,
-                        modifier = Modifier
-                            .then(if (index == 0) Modifier.focusRequester(firstRequester) else Modifier)
-                            .focusProperties {
-                                if (upRequester != null) up = upRequester
-                                if (downRequester != null) down = downRequester
-                            },
-                        onClick = { onSelect(item) },
-                    )
-                }
+        val itemWidth = if (isRanking) 160.dp else 130.dp
+        val itemHeight = if (isRanking) 64.dp else 56.dp
+        LazyRow(
+            state = resolvedRowState,
+            modifier = Modifier
+                .fillMaxWidth()
+                .focusGroup(),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            contentPadding = PaddingValues(horizontal = 4.dp, vertical = 10.dp),
+        ) {
+            lazyRowItemsIndexed(
+                keywords,
+                key = { index, item -> "${item.word}-${item.hot ?: 0}-$index" }
+            ) { index, item ->
+                SearchKeywordPill(
+                    item = item,
+                    meta = meta,
+                    index = index,
+                    isRanking = isRanking,
+                    itemWidth = itemWidth,
+                    itemHeight = itemHeight,
+                    focusRequester = if (index == 0) firstRequester else null,
+                    upRequester = upRequester,
+                    downRequester = downRequester,
+                    onClick = { onSelect(item) },
+                )
+            }
+            item {
                 Spacer(modifier = Modifier.width(14.dp))
             }
         }
@@ -935,6 +1049,136 @@ private fun SearchSectionHeader(
     }
 }
 
+@Composable
+private fun SearchRankingTabRow(
+    tabs: List<SearchRankingTab>,
+    activeTabIndex: Int,
+    requesters: List<FocusRequester>,
+    firstRequester: FocusRequester,
+    upRequester: FocusRequester? = null,
+    downRequester: FocusRequester? = null,
+    onMoveDown: (() -> Boolean)? = null,
+    onSelect: (SearchRankingTab) -> Unit,
+) {
+    if (tabs.isEmpty()) return
+
+    LazyRow(
+        modifier = Modifier
+            .fillMaxWidth()
+            .focusGroup(),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        contentPadding = PaddingValues(horizontal = 2.dp, vertical = 7.dp),
+    ) {
+        lazyRowItemsIndexed(tabs, key = { _, tab -> "${tab.index}-${tab.title}" }) { index, tab ->
+            SearchDiscoverTabChip(
+                text = tab.title,
+                selected = tab.index == activeTabIndex,
+                focusRequester = when {
+                    index == 0 -> firstRequester
+                    index < requesters.size -> requesters[index]
+                    else -> null
+                },
+                upRequester = upRequester,
+                downRequester = downRequester,
+                onMoveDown = onMoveDown,
+                onFocused = { onSelect(tab) },
+                onClick = { onSelect(tab) },
+            )
+        }
+    }
+}
+
+@Composable
+private fun SearchDiscoverTabChip(
+    text: String,
+    selected: Boolean,
+    focusRequester: FocusRequester? = null,
+    upRequester: FocusRequester? = null,
+    downRequester: FocusRequester? = null,
+    onMoveDown: (() -> Boolean)? = null,
+    onFocused: () -> Unit = {},
+    onClick: () -> Unit,
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val focused by interactionSource.collectIsFocusedAsState()
+    val shape = RoundedCornerShape(12.dp)
+
+    Box(
+        modifier = Modifier
+            .consumeRepeatedDpadEvents()
+            .height(42.dp)
+            .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
+            .focusProperties {
+                upRequester?.let { up = it }
+                downRequester?.let { down = it }
+            }
+            .onPreviewKeyEvent { event ->
+                if (event.isRepeatedDpadEvent()) return@onPreviewKeyEvent true
+                if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                when (event.key) {
+                    Key.DirectionCenter, Key.Enter -> {
+                        onClick()
+                        true
+                    }
+                    Key.DirectionUp -> {
+                        upRequester?.requestFocus()
+                        upRequester != null
+                    }
+                    Key.DirectionDown -> {
+                        if (onMoveDown?.invoke() == true) {
+                            return@onPreviewKeyEvent true
+                        }
+                        downRequester?.requestFocus()
+                        downRequester != null
+                    }
+                    else -> false
+                }
+            }
+            .focusable(interactionSource = interactionSource)
+            .clickable(
+                interactionSource = interactionSource,
+                indication = null,
+                onClick = onClick,
+            )
+            .onFocusChanged {
+                if (it.isFocused) onFocused()
+            }
+    ) {
+        Surface(
+            color = when {
+                focused -> Color.White
+                selected -> Color(0xFF2A4368)
+                else -> Color(0xFF172233)
+            },
+            shape = shape,
+            border = BorderStroke(
+                width = if (focused) 2.dp else 1.dp,
+                color = when {
+                    focused -> TvFocusBorder
+                    selected -> Color.White.copy(alpha = 0.14f)
+                    else -> Color.White.copy(alpha = 0.08f)
+                },
+            ),
+            modifier = Modifier.fillMaxSize(),
+        ) {
+            Box(
+                modifier = Modifier.padding(horizontal = 18.dp, vertical = 10.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = text,
+                    style = MaterialTheme.typography.titleMedium.copy(
+                        fontSize = 15.sp,
+                        fontWeight = if (selected || focused) FontWeight.Bold else FontWeight.Medium,
+                    ),
+                    color = if (focused) Color.Black else Color.White,
+                    maxLines = 1,
+                )
+            }
+        }
+    }
+}
+
 private fun formatHotMetric(hot: Int?): String? {
     if (hot == null || hot <= 0) return null
     return when {
@@ -954,7 +1198,9 @@ private fun SearchKeywordPill(
     isRanking: Boolean,
     itemWidth: androidx.compose.ui.unit.Dp,
     itemHeight: androidx.compose.ui.unit.Dp,
-    modifier: Modifier = Modifier,
+    focusRequester: FocusRequester? = null,
+    upRequester: FocusRequester? = null,
+    downRequester: FocusRequester? = null,
     onClick: () -> Unit,
 ) {
     var focused by remember { mutableStateOf(false) }
@@ -962,101 +1208,131 @@ private fun SearchKeywordPill(
     val rankText = "${index + 1}"
     val trendText = formatHotMetric(item.hot)
 
-    Surface(
-        onClick = onClick,
-        // 简化了背景处理，直接在 Surface 应用微调底色
-        color = if (focused) Color(0xFF1B2945) else Color(0xFF172233),
-        shape = shape,
-        modifier = modifier
-            .consumeRepeatedDpadEvents()
+    val interactionSource = remember { MutableInteractionSource() }
+    val isFocused by interactionSource.collectIsFocusedAsState()
+    focused = isFocused
+
+    Box(
+        modifier = Modifier
             .width(itemWidth)
             .height(itemHeight)
-            .onFocusChanged { focused = it.isFocused }
-            // 修复焦点发光问题，使用高亮阴影模拟外发光
+            .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
+            .focusProperties {
+                if (upRequester != null) up = upRequester
+                if (downRequester != null) down = downRequester
+            }
+            .onPreviewKeyEvent { event ->
+                if (event.isRepeatedDpadEvent()) return@onPreviewKeyEvent true
+                if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                when (event.key) {
+                    Key.DirectionUp -> {
+                        upRequester?.requestFocus()
+                        upRequester != null
+                    }
+                    Key.DirectionDown -> {
+                        downRequester?.requestFocus()
+                        downRequester != null
+                    }
+                    else -> false
+                }
+            }
+            .focusable(interactionSource = interactionSource)
+            .clickable(
+                interactionSource = interactionSource,
+                indication = null,
+                onClick = onClick,
+            )
             .shadow(
                 elevation = if (focused) 8.dp else 0.dp,
                 shape = shape,
                 ambientColor = if (focused) Color(0x664F98FF) else Color.Transparent,
                 spotColor = if (focused) Color(0xCC6FA8FF) else Color.Transparent,
             )
-            // 搭配高亮的边框提升精致感
             .border(
                 width = if (focused) 2.dp else 1.dp,
                 color = if (focused) Color(0xFF6EA8FF) else Color.White.copy(alpha = 0.08f),
                 shape = shape
             ),
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(horizontal = 12.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(14.dp),
+        Card(
+            shape = shape,
+            colors = CardDefaults.cardColors(
+                containerColor = if (focused) Color(0xFF1B2945) else Color(0xFF172233),
+            ),
+            modifier = Modifier.fillMaxSize(),
         ) {
-            val circleColors = if (isRanking) {
-                when (index) {
-                    0 -> listOf(Color(0xFFFF5A3C), Color(0xFFFF7D49))
-                    1 -> listOf(Color(0xFFFFA72D), Color(0xFFFFB84F))
-                    2 -> listOf(Color(0xFFFFD11A), Color(0xFFFFE04A))
-                    else -> listOf(Color.White.copy(alpha = 0.20f), Color.White.copy(alpha = 0.10f))
-                }
-            } else {
-                listOf(meta.accent.copy(alpha = 0.90f), meta.secondaryAccent.copy(alpha = 0.82f))
-            }
-
-            Box(
+            Row(
                 modifier = Modifier
-                    .size(28.dp)
-                    .background(
-                        brush = Brush.linearGradient(colors = circleColors),
-                        shape = CircleShape,
-                    ),
-                contentAlignment = Alignment.Center,
+                    .fillMaxSize()
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(14.dp),
             ) {
-                if (isRanking) {
-                    Text(
-                        text = rankText,
-                        style = MaterialTheme.typography.labelSmall.copy(
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 14.sp,
-                        ),
-                        color = if (index < 3) Color.White else Color.White.copy(alpha = 0.82f),
-                        textAlign = TextAlign.Center,
-                    )
+                val circleColors = if (isRanking) {
+                    when (index) {
+                        0 -> listOf(Color(0xFFFF5A3C), Color(0xFFFF7D49))
+                        1 -> listOf(Color(0xFFFFA72D), Color(0xFFFFB84F))
+                        2 -> listOf(Color(0xFFFFD11A), Color(0xFFFFE04A))
+                        else -> listOf(Color.White.copy(alpha = 0.20f), Color.White.copy(alpha = 0.10f))
+                    }
                 } else {
-                    Box(
-                        modifier = Modifier
-                            .size(6.dp)
-                            .background(Color.White, CircleShape),
-                    )
+                    listOf(meta.accent.copy(alpha = 0.90f), meta.secondaryAccent.copy(alpha = 0.82f))
                 }
-            }
 
-            Column(
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                Text(
-                    text = item.word,
-                    style = MaterialTheme.typography.titleMedium.copy(
-                        fontWeight = if (focused) FontWeight.Bold else FontWeight.SemiBold,
-                        fontSize = if (isRanking) 15.sp else 14.sp,
-                    ),
-                    color = Color.White,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = if (focused) Modifier.basicMarquee(iterations = Int.MAX_VALUE) else Modifier,
-                )
-                if (trendText != null) {
-                    Text(
-                        text = trendText,
-                        style = MaterialTheme.typography.bodySmall.copy(
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Medium,
+                Box(
+                    modifier = Modifier
+                        .size(28.dp)
+                        .background(
+                            brush = Brush.linearGradient(colors = circleColors),
+                            shape = CircleShape,
                         ),
-                        color = if (index < 3) Color(0xFFFF9D6D) else Color.White.copy(alpha = 0.58f),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    if (isRanking) {
+                        Text(
+                            text = rankText,
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 14.sp,
+                            ),
+                            color = if (index < 3) Color.White else Color.White.copy(alpha = 0.82f),
+                            textAlign = TextAlign.Center,
+                        )
+                    } else {
+                        Box(
+                            modifier = Modifier
+                                .size(6.dp)
+                                .background(Color.White, CircleShape),
+                        )
+                    }
+                }
+
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Text(
+                        text = item.word,
+                        style = MaterialTheme.typography.titleMedium.copy(
+                            fontWeight = if (focused) FontWeight.Bold else FontWeight.SemiBold,
+                            fontSize = if (isRanking) 15.sp else 14.sp,
+                        ),
+                        color = Color.White,
                         maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = if (focused) Modifier.basicMarquee(iterations = Int.MAX_VALUE) else Modifier,
                     )
+                    if (trendText != null) {
+                        Text(
+                            text = trendText,
+                            style = MaterialTheme.typography.bodySmall.copy(
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Medium,
+                            ),
+                            color = if (index < 3) Color(0xFFFF9D6D) else Color.White.copy(alpha = 0.58f),
+                            maxLines = 1,
+                        )
+                    }
                 }
             }
         }
