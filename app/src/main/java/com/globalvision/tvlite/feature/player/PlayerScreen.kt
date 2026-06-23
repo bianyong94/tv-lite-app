@@ -70,9 +70,14 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.zIndex
+import androidx.media3.common.C
+import androidx.media3.common.Format
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.common.Player
 import androidx.media3.common.PlaybackException
+import androidx.media3.common.TrackGroup
+import androidx.media3.common.TrackSelectionOverride
+import androidx.media3.common.Tracks
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import com.globalvision.tvlite.core.local.TvPlaybackHistoryStore
@@ -98,6 +103,29 @@ private const val SOURCE_LOAD_TIMEOUT_MS = 20_000L
 private enum class PlayerOverlayPanel {
     Controls,
     Menu,
+}
+
+private enum class VideoTrackPickerMode {
+    Bitrate,
+    Resolution,
+}
+
+private data class VideoTrackOption(
+    val trackGroup: TrackGroup,
+    val trackIndex: Int,
+    val label: String,
+    val bitrate: Int,
+    val width: Int,
+    val height: Int,
+    val selected: Boolean,
+)
+
+private data class VideoTrackPickerState(
+    val bitrateOptions: List<VideoTrackOption> = emptyList(),
+    val resolutionOptions: List<VideoTrackOption> = emptyList(),
+) {
+    val hasOptions: Boolean
+        get() = bitrateOptions.size > 1 || resolutionOptions.size > 1
 }
 
 @UnstableApi
@@ -141,6 +169,8 @@ fun PlayerScreen(
     var parseFallbackAttempted by remember { mutableStateOf(false) }
     var detail by remember(movieId) { mutableStateOf<TvMovieDetail?>(null) }
     var sources by remember(movieId) { mutableStateOf<List<TvPlaySource>>(emptyList()) }
+    var videoTrackPickerMode by remember { mutableStateOf<VideoTrackPickerMode?>(null) }
+    var videoTrackPickerState by remember { mutableStateOf(VideoTrackPickerState()) }
     val episodeCache = remember(movieId) { mutableStateMapOf<String, List<TvEpisode>>() }
     var pendingSeekPositionMs by rememberSaveable(movieId) { mutableStateOf(0L) }
     var shouldApplyPendingSeek by rememberSaveable(movieId) { mutableStateOf(false) }
@@ -173,6 +203,14 @@ fun PlayerScreen(
     val episodeChipRequesters = remember(pickerSource?.code, pickerEpisodes.size) {
         List(pickerEpisodes.size) { FocusRequester() }
     }
+    val activeVideoTrackOptions = when (videoTrackPickerMode) {
+        VideoTrackPickerMode.Bitrate -> videoTrackPickerState.bitrateOptions
+        VideoTrackPickerMode.Resolution -> videoTrackPickerState.resolutionOptions
+        null -> emptyList()
+    }
+    val videoTrackOptionRequesters = remember(videoTrackPickerMode, activeVideoTrackOptions.size) {
+        List(activeVideoTrackOptions.size) { FocusRequester() }
+    }
 
     fun touchOverlay() {
         overlayLastTouchedAtMs = SystemClock.uptimeMillis()
@@ -189,7 +227,18 @@ fun PlayerScreen(
     }
 
     fun hideAllOverlays() {
+        videoTrackPickerMode = null
         overlayPanel = null
+    }
+
+    fun showTrackPicker(mode: VideoTrackPickerMode) {
+        if (!videoTrackPickerState.hasOptions) {
+            statusHost?.show("当前源暂无可切换轨道", "这个片源没有提供多个视频轨道。", timeoutMs = 2600L)
+            return
+        }
+        videoTrackPickerMode = mode
+        overlayPanel = PlayerOverlayPanel.Controls
+        touchOverlay()
     }
 
     fun keepOverlayAlive() {
@@ -208,6 +257,13 @@ fun PlayerScreen(
         playbackSpeed = controller.playbackSpeed()
     }
 
+    fun applyVideoTrackOption(option: VideoTrackOption) {
+        controller.selectVideoTrack(option.trackGroup, option.trackIndex)
+        videoTrackPickerMode = null
+        statusHost?.show("轨道已切换", formatResolutionLabel(option), timeoutMs = 2200L)
+        touchOverlay()
+    }
+
     fun beginPlayback(
         playUrl: String,
         loadingText: String = "正在加载...",
@@ -217,6 +273,8 @@ fun PlayerScreen(
         errorMessage = null
         loadingMessage = loadingText
         waitingForPlayableSource = true
+        videoTrackPickerMode = null
+        videoTrackPickerState = VideoTrackPickerState()
         playbackLoadStartedAtMs = SystemClock.uptimeMillis()
         currentPlaybackEpisode = episode
         parseFallbackAllowed = allowParseFallback
@@ -261,6 +319,8 @@ fun PlayerScreen(
             return@LaunchedEffect
         }
         initialPlaybackTriggered = false
+        videoTrackPickerMode = null
+        videoTrackPickerState = VideoTrackPickerState()
         loadingMessage = "正在准备媒体源..."
         val loadedDetail = try {
             repository.getDetail(movieId)
@@ -405,6 +465,17 @@ fun PlayerScreen(
             override fun onPlaybackParametersChanged(playbackParameters: androidx.media3.common.PlaybackParameters) {
                 playbackSpeed = playbackParameters.speed
             }
+            override fun onTracksChanged(tracks: Tracks) {
+                val pickerState = buildVideoTrackPickerState(tracks)
+                val videoGroupCount = tracks.groups.count { group ->
+                    group.getType() == C.TRACK_TYPE_VIDEO && group.isSupported()
+                }
+                Log.d(
+                    tag,
+                    "tracks changed: videoGroups=$videoGroupCount bitrateOptions=${pickerState.bitrateOptions.size} resolutionOptions=${pickerState.resolutionOptions.size}",
+                )
+                videoTrackPickerState = pickerState
+            }
             override fun onPlayerError(error: PlaybackException) {
                 val failedEpisode = currentPlaybackEpisode
                 val canTryParseFallback = parseFallbackAllowed && !parseFallbackAttempted && failedEpisode != null
@@ -483,6 +554,12 @@ fun PlayerScreen(
         }
     }
 
+    LaunchedEffect(videoTrackPickerMode, activeVideoTrackOptions.size) {
+        if (videoTrackPickerMode == null || activeVideoTrackOptions.isEmpty()) return@LaunchedEffect
+        delay(32)
+        videoTrackOptionRequesters.firstOrNull()?.requestFocus()
+    }
+
     LaunchedEffect(errorMessage) {
         if (errorMessage != null) {
             delay(32)
@@ -496,7 +573,13 @@ fun PlayerScreen(
         loadEpisodesForSource(source)
     }
 
-    BackHandler(enabled = anyOverlayVisible) { hideAllOverlays() }
+    BackHandler(enabled = anyOverlayVisible) {
+        if (videoTrackPickerMode != null) {
+            videoTrackPickerMode = null
+        } else {
+            hideAllOverlays()
+        }
+    }
     BackHandler(enabled = !anyOverlayVisible) { persistHistoryAndBack() }
 
     LaunchedEffect(anyOverlayVisible, overlayLastTouchedAtMs) {
@@ -575,7 +658,11 @@ fun PlayerScreen(
                 if (overlayPanel == PlayerOverlayPanel.Controls) {
                     return@onPreviewKeyEvent when (event.key) {
                         Key.Back -> {
-                            hideAllOverlays()
+                            if (videoTrackPickerMode != null) {
+                                videoTrackPickerMode = null
+                            } else {
+                                hideAllOverlays()
+                            }
                             true
                         }
                         Key.Menu -> {
@@ -845,6 +932,73 @@ fun PlayerScreen(
                         onFocused = ::keepOverlayAlive,
                         modifier = Modifier.weight(1f),
                         subtitle = formatSpeedLabel(playbackSpeed),
+                    )
+                }
+
+                if (videoTrackPickerState.hasOptions) {
+                    val selectedVideoTrackOption = videoTrackPickerState.resolutionOptions.firstOrNull { it.selected }
+                        ?: videoTrackPickerState.bitrateOptions.firstOrNull { it.selected }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(16.dp),
+                    ) {
+                        PlayerControlButton(
+                            text = "码率选择",
+                            onClick = {
+                                showTrackPicker(VideoTrackPickerMode.Bitrate)
+                                keepOverlayAlive()
+                            },
+                            onFocused = ::keepOverlayAlive,
+                            selected = videoTrackPickerMode == VideoTrackPickerMode.Bitrate,
+                            modifier = Modifier.weight(1f),
+                            subtitle = selectedVideoTrackOption?.let { formatBitrateLabel(it.bitrate) } ?: "自动",
+                        )
+                        PlayerControlButton(
+                            text = "清晰度选择",
+                            onClick = {
+                                showTrackPicker(VideoTrackPickerMode.Resolution)
+                                keepOverlayAlive()
+                            },
+                            onFocused = ::keepOverlayAlive,
+                            selected = videoTrackPickerMode == VideoTrackPickerMode.Resolution,
+                            modifier = Modifier.weight(1f),
+                            subtitle = selectedVideoTrackOption?.let { formatResolutionLabel(it) } ?: "自动",
+                        )
+                        PlayerControlButton(
+                            text = "自动",
+                            onClick = {
+                                controller.enableAutoVideoQuality()
+                                videoTrackPickerMode = null
+                                statusHost?.show("视频轨道", "已恢复自动选择", timeoutMs = 2200L)
+                                keepOverlayAlive()
+                            },
+                            onFocused = ::keepOverlayAlive,
+                            modifier = Modifier.weight(0.8f),
+                        )
+                    }
+
+                    if (videoTrackPickerMode != null) {
+                        VideoTrackPickerSection(
+                            mode = videoTrackPickerMode ?: VideoTrackPickerMode.Bitrate,
+                            state = videoTrackPickerState,
+                            optionRequesters = videoTrackOptionRequesters,
+                            onSelect = ::applyVideoTrackOption,
+                            onAuto = {
+                                controller.enableAutoVideoQuality()
+                                videoTrackPickerMode = null
+                                statusHost?.show("视频轨道", "已恢复自动选择", timeoutMs = 2200L)
+                            },
+                            onFocused = ::keepOverlayAlive,
+                        )
+                    }
+                } else {
+                    Text(
+                        text = "当前源只提供单一视频轨道，清晰度和码率由资源决定。",
+                        style = MaterialTheme.typography.bodyMedium.copy(
+                            color = Color.White.copy(alpha = 0.58f),
+                            fontSize = 13.sp,
+                        ),
                     )
                 }
             }
@@ -1128,6 +1282,169 @@ private fun BoxScope.PlayerEpisodePicker(
 private fun formatSpeedLabel(speed: Float): String {
     val normalized = if (speed % 1f == 0f) speed.toInt().toString() else speed.toString()
     return "${normalized}x"
+}
+
+private fun formatBitrateLabel(bitrate: Int): String {
+    if (bitrate <= 0) return "未知码率"
+    return when {
+        bitrate >= 1_000_000 -> {
+            val value = bitrate / 1_000_000f
+            "${if (value % 1f == 0f) value.toInt() else String.format("%.1f", value)} Mbps"
+        }
+        bitrate >= 1_000 -> {
+            val value = bitrate / 1_000f
+            "${if (value % 1f == 0f) value.toInt() else String.format("%.0f", value)} Kbps"
+        }
+        else -> "${bitrate}bps"
+    }
+}
+
+private fun formatResolutionLabel(option: VideoTrackOption): String {
+    val width = option.width
+    val height = option.height
+    val resolution = when {
+        height > 0 -> "${height}P"
+        width > 0 -> "${width}W"
+        else -> "未知清晰度"
+    }
+    return if (option.label.isNotBlank() && option.label != resolution) {
+        "${resolution} · ${option.label}"
+    } else {
+        resolution
+    }
+}
+
+private fun formatTrackPickerLabel(option: VideoTrackOption, mode: VideoTrackPickerMode): String {
+    return when (mode) {
+        VideoTrackPickerMode.Bitrate -> {
+            val bitrate = formatBitrateLabel(option.bitrate)
+            val resolution = formatResolutionLabel(option)
+            if (resolution == "未知清晰度") bitrate else "$bitrate · $resolution"
+        }
+        VideoTrackPickerMode.Resolution -> {
+            val resolution = formatResolutionLabel(option)
+            val bitrate = formatBitrateLabel(option.bitrate)
+            if (bitrate == "未知码率") resolution else "$resolution · $bitrate"
+        }
+    }
+}
+
+private fun buildVideoTrackPickerState(tracks: Tracks): VideoTrackPickerState {
+    val selectedGroup = tracks.groups.firstOrNull { group ->
+        group.getType() == C.TRACK_TYPE_VIDEO && group.isSupported() && group.isSelected()
+    } ?: tracks.groups.firstOrNull { group ->
+        group.getType() == C.TRACK_TYPE_VIDEO && group.isSupported()
+    } ?: return VideoTrackPickerState()
+
+    val options = buildList {
+        for (index in 0 until selectedGroup.length) {
+            if (!selectedGroup.isTrackSupported(index, true)) continue
+            val format = selectedGroup.getTrackFormat(index)
+            add(
+                VideoTrackOption(
+                    trackGroup = selectedGroup.getMediaTrackGroup(),
+                    trackIndex = index,
+                    label = format.label.orEmpty(),
+                    bitrate = format.bitrate.takeIf { it > 0 } ?: 0,
+                    width = format.width.takeIf { it > 0 } ?: 0,
+                    height = format.height.takeIf { it > 0 } ?: 0,
+                    selected = selectedGroup.isTrackSelected(index),
+                ),
+            )
+        }
+    }
+
+    if (options.size <= 1) {
+        return VideoTrackPickerState()
+    }
+
+    val bitrateOptions = options.sortedWith(
+        compareByDescending<VideoTrackOption> { it.bitrate }
+            .thenByDescending { it.height }
+            .thenByDescending { it.width },
+    )
+    val resolutionOptions = options.sortedWith(
+        compareByDescending<VideoTrackOption> { it.height }
+            .thenByDescending { it.width }
+            .thenByDescending { it.bitrate },
+    )
+
+    return VideoTrackPickerState(
+        bitrateOptions = bitrateOptions,
+        resolutionOptions = resolutionOptions,
+    )
+}
+
+@Composable
+private fun VideoTrackPickerSection(
+    mode: VideoTrackPickerMode,
+    state: VideoTrackPickerState,
+    optionRequesters: List<FocusRequester>,
+    onSelect: (VideoTrackOption) -> Unit,
+    onAuto: () -> Unit,
+    onFocused: () -> Unit = {},
+) {
+    val options = when (mode) {
+        VideoTrackPickerMode.Bitrate -> state.bitrateOptions
+        VideoTrackPickerMode.Resolution -> state.resolutionOptions
+    }
+    if (options.isEmpty()) return
+
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.Bottom,
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(
+                    text = when (mode) {
+                        VideoTrackPickerMode.Bitrate -> "码率列表"
+                        VideoTrackPickerMode.Resolution -> "清晰度列表"
+                    },
+                    style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.SemiBold),
+                    color = Color.White,
+                )
+                Text(
+                    text = when (mode) {
+                        VideoTrackPickerMode.Bitrate -> "按当前源的码率档位展示。"
+                        VideoTrackPickerMode.Resolution -> "按当前源的清晰度档位展示。"
+                    },
+                    style = MaterialTheme.typography.bodyMedium.copy(fontSize = 12.sp),
+                    color = Color.White.copy(alpha = 0.52f),
+                )
+            }
+            TvFocusChip(
+                text = "恢复自动",
+                selected = false,
+                minWidth = 112.dp,
+                keepVisibleOnFocus = false,
+                onClick = onAuto,
+                modifier = Modifier.onFocusChanged { if (it.isFocused) onFocused() },
+            )
+        }
+
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            options.forEachIndexed { index, option ->
+                TvFocusChip(
+                    text = formatTrackPickerLabel(option, mode),
+                    selected = option.selected,
+                    minWidth = 168.dp,
+                    keepVisibleOnFocus = false,
+                    modifier = (optionRequesters.getOrNull(index)?.let { Modifier.focusRequester(it) } ?: Modifier)
+                        .onFocusChanged { if (it.isFocused) onFocused() },
+                    onClick = { onSelect(option) },
+                )
+            }
+        }
+    }
 }
 
 @Composable

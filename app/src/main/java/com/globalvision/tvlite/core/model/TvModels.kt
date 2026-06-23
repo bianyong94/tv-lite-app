@@ -24,6 +24,7 @@ data class TvPosterItem(
     val title: String,
     val posterUrl: String,
     val backdropUrl: String = "",
+    val label: String = "",
     val year: String = "",
     val score: String = "",
     val category: String = "",

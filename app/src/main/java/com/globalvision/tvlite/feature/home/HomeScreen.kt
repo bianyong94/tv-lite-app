@@ -148,7 +148,7 @@ fun HomeScreen(
         TopicFilters()
     } else {
         filtersByNavId[activeNavId] ?: TopicFilters(
-            sort = activeFilterGroup?.sortValues?.firstOrNull().orEmpty().ifBlank { "by_time" },
+            sort = activeFilterGroup?.sortValues?.firstOrNull().orEmpty().ifBlank { "by_default" },
         )
     }
     val contentQueryKey = ScreenQueryKey(
@@ -168,7 +168,7 @@ fun HomeScreen(
             val items = try {
                 repository.getScreenMovies(
                     typeId = activeNavId,
-                    sort = topicFilters.sort.ifBlank { "by_time" },
+                    sort = topicFilters.sort.ifBlank { "by_default" },
                     classValue = topicFilters.classValue.ifBlank { null },
                     area = topicFilters.area.ifBlank { null },
                     year = topicFilters.year.ifBlank { null },
@@ -177,16 +177,21 @@ fun HomeScreen(
                 )
             } catch (_: Throwable) {
                 statusHost?.show("加载更多失败", "当前网络较慢，稍后再试。", timeoutMs = 2600L)
-                emptyList()
+                TvRepository.ScreenMoviesResult(
+                    items = emptyList(),
+                    nextPage = pageToLoad,
+                    hasMore = true,
+                    total = 0,
+                )
             }
 
-            if (items.isNotEmpty()) {
-                contentItems = contentItems + items
+            if (items.items.isNotEmpty()) {
+                contentItems = contentItems + items.items
             } else {
                 hasMoreContent = false
             }
-            hasMoreContent = hasMoreContent && items.size >= PAGE_SIZE
-            contentPage = pageToLoad + 1
+            hasMoreContent = hasMoreContent && items.hasMore
+            contentPage = items.nextPage
             loadingMoreContent = false
             screenCache[contentQueryKey] = CachedScreenContent(
                 items = contentItems,
@@ -269,7 +274,7 @@ fun HomeScreen(
         val items = try {
             repository.getScreenMovies(
                 typeId = activeNavId,
-                sort = topicFilters.sort.ifBlank { "by_time" },
+                sort = topicFilters.sort.ifBlank { "by_default" },
                 classValue = topicFilters.classValue.ifBlank { null },
                 area = topicFilters.area.ifBlank { null },
                 year = topicFilters.year.ifBlank { null },
@@ -278,15 +283,20 @@ fun HomeScreen(
             )
         } catch (_: Throwable) {
             statusHost?.show("内容加载失败", "当前栏目暂时无法获取数据。", timeoutMs = 2600L)
-            emptyList()
+            TvRepository.ScreenMoviesResult(
+                items = emptyList(),
+                nextPage = 1,
+                hasMore = false,
+                total = 0,
+            )
         }
-        contentItems = items
+        contentItems = items.items
         contentLoading = false
-        hasMoreContent = items.size >= PAGE_SIZE
-        contentPage = 2
+        hasMoreContent = items.hasMore
+        contentPage = items.nextPage
         screenCache[contentQueryKey] = CachedScreenContent(
-            items = items,
-            nextPage = 2,
+            items = items.items,
+            nextPage = items.nextPage,
             hasMore = hasMoreContent,
         )
     }
@@ -479,7 +489,7 @@ fun HomeScreen(
 }
 
 private data class TopicFilters(
-    val sort: String = "by_time",
+    val sort: String = "by_default",
     val classValue: String = "",
     val area: String = "",
     val year: String = "",
@@ -703,7 +713,7 @@ private fun FilterPanel(
     ) {
         FilterRow(
             label = "综合",
-            items = buildSortFilterOptions(filterGroup.sortValues.ifEmpty { listOf("by_time", "by_hits", "by_score") }),
+            items = buildSortFilterOptions(filterGroup.sortValues.ifEmpty { listOf("by_default", "by_time", "by_hits", "by_score") }),
             selected = filters.sort,
             showAll = false,
             firstItemFocusRequester = entryFocusRequester,
@@ -945,12 +955,12 @@ private fun CompactPosterCard(
                         ),
                 )
                 
-                // 左上角的高亮标签角标
-                if (item.remark.isNotBlank()) {
+                val primaryBadge = item.label.ifBlank { item.remark }
+                if (primaryBadge.isNotBlank()) {
                     val remarkBackground = if (focused) MaterialTheme.colorScheme.primary else Color.Black.copy(alpha = 0.65f)
                     val remarkTextColor = if (focused) MaterialTheme.colorScheme.onPrimary else Color.White
                     Text(
-                        text = item.remark,
+                        text = primaryBadge,
                         style = MaterialTheme.typography.titleSmall.copy(
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Bold
@@ -965,6 +975,38 @@ private fun CompactPosterCard(
                             .padding(horizontal = 8.dp, vertical = 4.dp),
                         maxLines = 1,
                     )
+                }
+
+                val metaBadges = listOfNotNull(
+                    item.score.takeIf { it.isNotBlank() },
+                    item.year.takeIf { it.isNotBlank() },
+                    item.category.takeIf { it.isNotBlank() },
+                ).distinct().take(3)
+                if (metaBadges.isNotEmpty()) {
+                    Row(
+                        modifier = Modifier
+                            .align(Alignment.BottomStart)
+                            .padding(start = 10.dp, end = 10.dp, bottom = 56.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        metaBadges.forEach { badge ->
+                            Text(
+                                text = badge,
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = Color.White,
+                                ),
+                                modifier = Modifier
+                                    .background(
+                                        color = Color.Black.copy(alpha = if (focused) 0.7f else 0.55f),
+                                        shape = RoundedCornerShape(999.dp),
+                                    )
+                                    .padding(horizontal = 8.dp, vertical = 3.dp),
+                                maxLines = 1,
+                            )
+                        }
+                    }
                 }
 
                 Column(
@@ -1010,6 +1052,9 @@ private fun buildHomeNavItems(items: List<TvNavItem>): List<TvNavItem> {
             TvNavItem(id = 1, name = "电影"),
             TvNavItem(id = 2, name = "剧集"),
             TvNavItem(id = 3, name = "综艺"),
+            TvNavItem(id = 4, name = "动漫"),
+            TvNavItem(id = 36, name = "短剧"),
+            TvNavItem(id = 26, name = "福利"),
         )
     }
     val result = items.filter { it.id > 0 && it.name != "推荐" }.toMutableList()
@@ -1022,6 +1067,7 @@ private fun buildHomeNavItems(items: List<TvNavItem>): List<TvNavItem> {
 private fun buildSortFilterOptions(values: List<String>): List<FilterOption> {
     return values.map { value ->
         val label = when (value) {
+            "by_default" -> "综合"
             "by_time" -> "最新"
             "by_hits" -> "最热"
             "by_score" -> "评分"

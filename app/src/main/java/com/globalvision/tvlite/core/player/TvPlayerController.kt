@@ -5,6 +5,8 @@ import android.net.Uri
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
+import androidx.media3.common.TrackGroup
+import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
@@ -22,6 +24,7 @@ class TvPlayerController(context: Context) {
         )
     }
     private var startupQualityLimitEnabled = true
+    private var manualVideoTrackSelectionEnabled = false
 
     val player: ExoPlayer = ExoPlayer.Builder(context)
         .setTrackSelector(trackSelector)
@@ -41,12 +44,37 @@ class TvPlayerController(context: Context) {
     }
 
     fun allowAdaptiveVideoQuality() {
-        if (!startupQualityLimitEnabled) return
+        if (!startupQualityLimitEnabled || manualVideoTrackSelectionEnabled) return
         startupQualityLimitEnabled = false
         trackSelector.setParameters(
             trackSelector.buildUponParameters()
                 .clearVideoSizeConstraints()
                 .setMaxVideoBitrate(Int.MAX_VALUE)
+        )
+    }
+
+    fun enableAutoVideoQuality() {
+        manualVideoTrackSelectionEnabled = false
+        startupQualityLimitEnabled = false
+        player.setTrackSelectionParameters(
+            player.trackSelectionParameters.buildUpon()
+                .clearOverridesOfType(androidx.media3.common.C.TRACK_TYPE_VIDEO)
+                .clearVideoSizeConstraints()
+                .setMaxVideoBitrate(Int.MAX_VALUE)
+                .build(),
+        )
+    }
+
+    fun selectVideoTrack(trackGroup: TrackGroup, trackIndex: Int) {
+        manualVideoTrackSelectionEnabled = true
+        startupQualityLimitEnabled = false
+        player.setTrackSelectionParameters(
+            player.trackSelectionParameters.buildUpon()
+                .clearOverridesOfType(androidx.media3.common.C.TRACK_TYPE_VIDEO)
+                .clearVideoSizeConstraints()
+                .setMaxVideoBitrate(Int.MAX_VALUE)
+                .addOverride(TrackSelectionOverride(trackGroup, trackIndex))
+                .build(),
         )
     }
 
@@ -108,6 +136,7 @@ class TvPlayerController(context: Context) {
     }
 
     private fun enableStartupQualityLimit() {
+        manualVideoTrackSelectionEnabled = false
         startupQualityLimitEnabled = true
         trackSelector.setParameters(
             trackSelector.buildUponParameters()

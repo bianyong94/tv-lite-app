@@ -142,13 +142,13 @@ class TvRepository(
 
     suspend fun getScreenMovies(
         typeId: Int,
-        sort: String = "by_time",
+        sort: String = "by_default",
         classValue: String? = null,
         area: String? = null,
         year: String? = null,
         page: Int = 1,
         pageSize: Int = 30,
-    ): List<TvPosterItem> = withContext(Dispatchers.IO) {
+    ): ScreenMoviesResult = withContext(Dispatchers.IO) {
         val query = ScreenMoviesQuery(
             typeId = typeId,
             sort = sort,
@@ -158,7 +158,13 @@ class TvRepository(
         )
         screenMoviesPageCache[query]?.get(page)?.let {
             Log.d(TAG, "screen list cache hit: typeId=$typeId sort=$sort class=${classValue.orEmpty()} area=${area.orEmpty()} year=${year.orEmpty()} page=$page items=${it.size}")
-            return@withContext it
+            val cachedState = screenMoviesStateCache[query]
+            return@withContext ScreenMoviesResult(
+                items = it,
+                nextPage = maxOf(page + 1, cachedState?.nextPage ?: (page + 1)),
+                hasMore = cachedState?.hasMore ?: it.isNotEmpty(),
+                total = cachedState?.total ?: 0,
+            )
         }
 
         val response = api.get(
@@ -175,34 +181,42 @@ class TvRepository(
         )
         val data = response.optJSONObject("data") ?: response
         val list = data.optJSONArray("list").toPosterItems()
+        val total = data.optInt("total", 0)
         val pageCache = screenMoviesPageCache.getOrPut(query) { ConcurrentHashMap() }
         pageCache[page] = list
         val nextPage = page + 1
-        val hasMore = list.size >= pageSize
+        val hasMore = list.isNotEmpty()
         val currentState = screenMoviesStateCache[query]
         screenMoviesStateCache[query] = if (page == 1 || currentState == null) {
             ScreenMoviesState(
                 items = list,
                 nextPage = nextPage,
                 hasMore = hasMore,
+                total = total,
             )
         } else {
             ScreenMoviesState(
                 items = currentState.items + list,
                 nextPage = nextPage,
                 hasMore = hasMore,
+                total = if (total > 0) total else currentState.total,
             )
         }
         Log.d(
             TAG,
-            "screen list loaded: typeId=$typeId sort=$sort class=${classValue.orEmpty()} area=${area.orEmpty()} year=${year.orEmpty()} items=${list.size}",
+            "screen list loaded: typeId=$typeId sort=$sort class=${classValue.orEmpty()} area=${area.orEmpty()} year=${year.orEmpty()} page=$page total=$total items=${list.size} hasMore=$hasMore",
         )
-        list
+        ScreenMoviesResult(
+            items = list,
+            nextPage = nextPage,
+            hasMore = hasMore,
+            total = total,
+        )
     }
 
     fun peekScreenMoviesState(
         typeId: Int,
-        sort: String = "by_time",
+        sort: String = "by_default",
         classValue: String? = null,
         area: String? = null,
         year: String? = null,
@@ -219,7 +233,7 @@ class TvRepository(
 
     fun peekScreenMoviesPage(
         typeId: Int,
-        sort: String = "by_time",
+        sort: String = "by_default",
         classValue: String? = null,
         area: String? = null,
         year: String? = null,
@@ -324,12 +338,23 @@ class TvRepository(
         return mapConfig(data)
     }
 
-    private fun emptyConfig(): TvAppConfig = TvAppConfig()
+    private fun emptyConfig(): TvAppConfig = TvAppConfig(
+        topNav = fallbackTopNav(),
+        filterGroups = fallbackFilterGroups(),
+    )
 
     data class ScreenMoviesState(
         val items: List<TvPosterItem>,
         val nextPage: Int,
         val hasMore: Boolean,
+        val total: Int,
+    )
+
+    data class ScreenMoviesResult(
+        val items: List<TvPosterItem>,
+        val nextPage: Int,
+        val hasMore: Boolean,
+        val total: Int,
     )
 
     private data class ScreenMoviesQuery(
@@ -347,12 +372,14 @@ class TvRepository(
 
     private fun mapConfig(payload: JSONObject): TvAppConfig {
         val nav = payload.optJSONArray("index_top_nav").toNavItems()
-        val filterGroups = payload.optJSONObject("movie_screen")
+        val screenConfig = payload.optJSONObject("movie_screen")
+        val defaultSortValues = screenConfig?.optJSONArray("sort").toStringList()
+        val filterGroups = screenConfig
             ?.optJSONArray("filter")
-            .toFilterGroups()
+            .toFilterGroups(defaultSortValues)
         return TvAppConfig(
-            topNav = nav,
-            filterGroups = filterGroups,
+            topNav = nav.ifEmpty { fallbackTopNav() },
+            filterGroups = filterGroups.ifEmpty { fallbackFilterGroups(defaultSortValues) },
         )
     }
 
@@ -434,11 +461,12 @@ class TvRepository(
         }
     }
 
-    private fun JSONArray?.toFilterGroups(): List<TvFilterGroup> {
+    private fun JSONArray?.toFilterGroups(defaultSortValues: List<String> = emptyList()): List<TvFilterGroup> {
         if (this == null) return emptyList()
         return buildList {
             for (i in 0 until length()) {
                 val item = optJSONObject(i) ?: continue
+                val sortValues = item.optJSONArray("sort").toStringList()
                 add(
                     TvFilterGroup(
                         id = item.optInt("id"),
@@ -446,7 +474,7 @@ class TvRepository(
                         classValues = item.optJSONArray("class").toStringList(),
                         areaValues = item.optJSONArray("area").toStringList(),
                         yearValues = item.optJSONArray("year").toStringList(),
-                        sortValues = item.optJSONArray("sort").toStringList(),
+                        sortValues = sortValues.ifEmpty { defaultSortValues.ifEmpty { fallbackSortValues() } },
                     ),
                 )
             }
@@ -472,6 +500,7 @@ class TvRepository(
                         title = title,
                         posterUrl = normalizeImage(poster),
                         backdropUrl = normalizeImage(item.optString("backdrop")),
+                        label = item.optString("label"),
                         year = item.optString("year"),
                         score = item.optString("score"),
                         category = item.optString("type_name"),
@@ -502,6 +531,7 @@ class TvRepository(
                         title = title,
                         posterUrl = normalizeImage(poster),
                         backdropUrl = normalizeImage(item.optString("backdrop")),
+                        label = item.optString("label"),
                         year = item.optString("year"),
                         score = item.optString("score"),
                         category = item.optString("type_name"),
@@ -557,9 +587,22 @@ class TvRepository(
         if (this == null) return emptyList()
         return buildList {
             for (i in 0 until length()) {
-                add(optString(i))
+                val value = opt(i)
+                val text = when (value) {
+                    is String -> value.trim()
+                    is JSONObject -> value.optString("value")
+                        .ifBlank { value.optString("id") }
+                        .ifBlank { value.optString("name") }
+                        .ifBlank { value.optString("title") }
+                        .ifBlank { value.optString("label") }
+                        .ifBlank { value.optString("word") }
+                    else -> value?.toString().orEmpty().trim()
+                }
+                if (text.isNotBlank()) {
+                    add(text)
+                }
             }
-        }.filter { it.isNotBlank() }
+        }.distinct()
     }
 
     private fun JSONArray?.toSearchKeywordItems(): List<TvSearchKeywordItem> {
@@ -744,6 +787,32 @@ class TvRepository(
         const val TAG = "TvRepository"
         const val SEARCH_PAGE_SIZE = 30
     }
+
+    private fun fallbackTopNav(): List<TvNavItem> = listOf(
+        TvNavItem(id = 0, name = "推荐"),
+        TvNavItem(id = 1, name = "电影"),
+        TvNavItem(id = 2, name = "剧集"),
+        TvNavItem(id = 3, name = "综艺"),
+        TvNavItem(id = 4, name = "动漫"),
+        TvNavItem(id = 36, name = "短剧"),
+        TvNavItem(id = 26, name = "福利"),
+    )
+
+    private fun fallbackFilterGroups(sortValues: List<String> = fallbackSortValues()): List<TvFilterGroup> = listOf(
+        TvFilterGroup(id = 1, name = "电影", sortValues = sortValues),
+        TvFilterGroup(id = 2, name = "剧集", sortValues = sortValues),
+        TvFilterGroup(id = 3, name = "综艺", sortValues = sortValues),
+        TvFilterGroup(id = 4, name = "动漫", sortValues = sortValues),
+        TvFilterGroup(id = 36, name = "短剧", sortValues = sortValues),
+        TvFilterGroup(id = 26, name = "福利", sortValues = sortValues),
+    )
+
+    private fun fallbackSortValues(): List<String> = listOf(
+        "by_default",
+        "by_time",
+        "by_hits",
+        "by_score",
+    )
 
     private suspend fun resolveEpisodeUrlInternal(episode: TvEpisode, forceParse: Boolean = false): String {
         val playUrl = episode.playUrl.trim()
