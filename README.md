@@ -7,7 +7,7 @@
 - 已切换为独立包名 `com.globalvision.tvlite`。
 - 已建立新的大屏主题、焦点样式和分辨率适配基线。
 - 已成功生成 debug 安装包：`app/build/outputs/apk/debug/app-debug.apk`
-- 已生成签名 release 安装包：[app-release-signed.apk](downloads/app-release-signed.apk)
+- 已生成签名 release 安装包：[app-release-signed.apk](https://github.com/bianyong94/tv-lite-app/raw/main/downloads/app-release-signed.apk)
 - 已验证 `assembleDebug`、`assembleRelease`、`lintDebug` 三条构建链路通过。
 - 已整理真机验收清单：`QA_CHECKLIST.md`
 
