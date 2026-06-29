@@ -2,6 +2,7 @@ package com.globalvision.tvlite.navigation
 
 sealed class TvDestination(val route: String) {
     data object Home : TvDestination("home")
+    data object HomeV2 : TvDestination("home_v2")
     data object Search : TvDestination("search")
     data object History : TvDestination("history")
     data object Detail : TvDestination("detail/{id}?sourceIndex={sourceIndex}&episodeIndex={episodeIndex}&positionMs={positionMs}") {

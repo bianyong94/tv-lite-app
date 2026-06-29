@@ -14,3 +14,7 @@ val TvAccentSoft = Color(0xFF6FA7FF)
 // 高对比度焦点描边：在深色底与白色高亮背景上都清晰可见
 val TvFocusBorder = Color(0xFF2F9BFF)
 val TvDivider = Color(0x26FFFFFF)
+val TvV2MaterialSurface = Color(0x66202A36)
+val TvV2MaterialSurfaceFocused = Color(0xE6F6F8FB)
+val TvV2HeroScrim = Color(0xCC05070B)
+val TvV2FocusGlow = Color(0x66FFFFFF)

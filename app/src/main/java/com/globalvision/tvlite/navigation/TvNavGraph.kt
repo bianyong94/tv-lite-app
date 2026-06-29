@@ -14,6 +14,7 @@ import com.globalvision.tvlite.core.network.TvRepository
 import com.globalvision.tvlite.feature.detail.DetailScreen
 import com.globalvision.tvlite.feature.history.HistoryScreen
 import com.globalvision.tvlite.feature.home.HomeScreen
+import com.globalvision.tvlite.feature.home.HomeV2Screen
 import com.globalvision.tvlite.feature.player.PlayerScreen
 import com.globalvision.tvlite.feature.search.SearchScreen
 
@@ -39,9 +40,35 @@ fun TvNavGraph(
                     Log.d(tag, "navigate history")
                     navController.navigate(TvDestination.History.route)
                 },
+                onOpenHomeV2 = {
+                    Log.d(tag, "navigate home v2")
+                    navController.navigate(TvDestination.HomeV2.route)
+                },
                 onOpenDetail = {
                     Log.d(tag, "navigate detail: id=$it")
                     navController.navigate(TvDestination.Detail.createRoute(it))
+                },
+            )
+        }
+
+        composable(TvDestination.HomeV2.route) {
+            HomeV2Screen(
+                repository = repository,
+                onSearch = {
+                    Log.d(tag, "navigate search from home v2")
+                    navController.navigate(TvDestination.Search.route)
+                },
+                onHistory = {
+                    Log.d(tag, "navigate history from home v2")
+                    navController.navigate(TvDestination.History.route)
+                },
+                onOpenDetail = {
+                    Log.d(tag, "navigate detail from home v2: id=$it")
+                    navController.navigate(TvDestination.Detail.createRoute(it))
+                },
+                onBackToLegacy = {
+                    Log.d(tag, "back from home v2")
+                    navController.popBackStack()
                 },
             )
         }

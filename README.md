@@ -4,7 +4,7 @@ Android TV 极简客户端，支持绝大部份安卓电视，纯净无广，无
 
 ## 当前状态
 
-- release 安装包下载链接：[app-release-signed.apk](https://github.com/bianyong94/tv-lite-app/raw/main/downloads/app-release-signed.apk)
+- 最新 release 安装包（2026-06-29）：[app-release-signed.apk](https://github.com/bianyong94/tv-lite-app/raw/main/downloads/app-release-signed.apk)
 
 ## 界面展示
 

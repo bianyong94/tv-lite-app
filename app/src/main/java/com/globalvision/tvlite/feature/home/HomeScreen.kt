@@ -111,6 +111,7 @@ fun HomeScreen(
     repository: TvRepository,
     onSearch: () -> Unit,
     onHistory: () -> Unit,
+    onOpenHomeV2: (() -> Unit)? = null,
     onOpenDetail: (String) -> Unit,
 ) {
     val layout = rememberTvLayoutMetrics()
@@ -384,9 +385,16 @@ fun HomeScreen(
                     focusRequester = searchFocusRequester,
                     onFocused = { focusZone = HomeFocusZone.Sidebar },
                 )
-                
-               
-                
+                if (onOpenHomeV2 != null) {
+                    SidebarTab(
+                        text = "新版",
+                        selected = false,
+                        rightFocusRequester = if (activeNavId == 0) filterEntryFocusRequester else gridEntryFocusRequester,
+                        onFocused = { focusZone = HomeFocusZone.Sidebar },
+                        onClick = onOpenHomeV2,
+                    )
+                }
+
                 navItems.forEachIndexed { index, item ->
                     val rightTarget = if (item.id == 0) filterEntryFocusRequester else gridEntryFocusRequester
                     SidebarTab(
