@@ -17,6 +17,7 @@ import com.globalvision.tvlite.feature.home.HomeScreen
 import com.globalvision.tvlite.feature.home.HomeV2Screen
 import com.globalvision.tvlite.feature.player.PlayerScreen
 import com.globalvision.tvlite.feature.search.SearchScreen
+import com.globalvision.tvlite.feature.topic.TopicScreen
 
 @UnstableApi
 @Composable
@@ -40,9 +41,9 @@ fun TvNavGraph(
                     Log.d(tag, "navigate history")
                     navController.navigate(TvDestination.History.route)
                 },
-                onOpenHomeV2 = {
-                    Log.d(tag, "navigate home v2")
-                    navController.navigate(TvDestination.HomeV2.route)
+                onOpenTopics = {
+                    Log.d(tag, "navigate topic")
+                    navController.navigate(TvDestination.Topic.route)
                 },
                 onOpenDetail = {
                     Log.d(tag, "navigate detail: id=$it")
@@ -68,7 +69,9 @@ fun TvNavGraph(
                 },
                 onBackToLegacy = {
                     Log.d(tag, "back from home v2")
-                    navController.popBackStack()
+                    navController.navigate(TvDestination.Home.route) {
+                        launchSingleTop = true
+                    }
                 },
             )
         }
@@ -106,6 +109,16 @@ fun TvNavGraph(
             )
         }
 
+        composable(TvDestination.Topic.route) {
+            TopicScreen(
+                repository = repository,
+                onOpenDetail = {
+                    Log.d(tag, "navigate detail from topic: id=$it")
+                    navController.navigate(TvDestination.Detail.createRoute(it))
+                },
+            )
+        }
+
         composable(
             route = TvDestination.Detail.route,
             arguments = listOf(
@@ -125,6 +138,10 @@ fun TvNavGraph(
                 onBack = {
                     Log.d(tag, "back from detail: id=$id")
                     navController.popBackStack()
+                },
+                onOpenDetail = {
+                    Log.d(tag, "navigate recommended detail: id=$it")
+                    navController.navigate(TvDestination.Detail.createRoute(it))
                 },
                 onPlay = { title, movieId, sourceIndex, episodeIndex, positionMs ->
                     Log.d(

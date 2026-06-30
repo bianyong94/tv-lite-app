@@ -23,11 +23,19 @@ class TvRepository(
     private var searchRankingCache: List<TvSearchKeywordGroup>? = null
     @Volatile
     private var searchLatelyWordsCache: List<TvSearchKeywordItem>? = null
+    @Volatile
+    private var movieTopicsCache: List<TvMovieTopic>? = null
+    @Volatile
+    private var movieRankingsCache: List<TvMovieRanking>? = null
 
     private val detailCache = ConcurrentHashMap<String, TvMovieDetail>()
     private val posterFallbackCache = ConcurrentHashMap<String, String>()
     private val missingPosterFallbackIds = ConcurrentHashMap.newKeySet<String>()
     private val episodesCache = ConcurrentHashMap<EpisodeCacheKey, List<TvEpisode>>()
+    private val movieRecommendationsCache = ConcurrentHashMap<String, List<TvPosterItem>>()
+    private val movieTopicDetailCache = ConcurrentHashMap<String, TvMovieTopic>()
+    private val movieRankingItemsCache = ConcurrentHashMap<String, List<TvPosterItem>>()
+    private val weeklyMoviesCache = ConcurrentHashMap<Int, List<TvPosterItem>>()
     private val screenMoviesPageCache = ConcurrentHashMap<ScreenMoviesQuery, ConcurrentHashMap<Int, List<TvPosterItem>>>()
     private val screenMoviesStateCache = ConcurrentHashMap<ScreenMoviesQuery, ScreenMoviesState>()
 
@@ -293,6 +301,86 @@ class TvRepository(
         fallbackUrl
     }
 
+    suspend fun getMovieRecommendations(movieId: String): List<TvPosterItem> = withContext(Dispatchers.IO) {
+        if (movieId.isBlank()) return@withContext emptyList()
+        movieRecommendationsCache[movieId]?.let {
+            Log.d(TAG, "movie recommendations cache hit: movieId=$movieId size=${it.size}")
+            return@withContext it
+        }
+        val response = api.get("/movie/$movieId/recommend")
+        val items = response.extractPosterItems()
+        movieRecommendationsCache[movieId] = items
+        Log.d(TAG, "movie recommendations loaded: movieId=$movieId size=${items.size}")
+        items
+    }
+
+    suspend fun getMovieTopics(): List<TvMovieTopic> = withContext(Dispatchers.IO) {
+        movieTopicsCache?.let {
+            Log.d(TAG, "movie topics cache hit: size=${it.size}")
+            return@withContext it
+        }
+        val response = api.get("/movie/topic")
+        val topics = response.extractMovieTopics()
+        movieTopicsCache = topics
+        Log.d(TAG, "movie topics loaded: size=${topics.size}")
+        topics
+    }
+
+    suspend fun getMovieTopicDetail(topicId: String): TvMovieTopic = withContext(Dispatchers.IO) {
+        val normalizedId = topicId.trim()
+        if (normalizedId.isBlank()) {
+            return@withContext TvMovieTopic(id = "", title = "专题")
+        }
+        movieTopicDetailCache[normalizedId]?.let {
+            Log.d(TAG, "movie topic detail cache hit: id=$normalizedId items=${it.items.size}")
+            return@withContext it
+        }
+        val response = api.get("/movie/topic/$normalizedId")
+        val detail = response.extractMovieTopicDetail()
+        movieTopicDetailCache[normalizedId] = detail
+        Log.d(TAG, "movie topic detail loaded: id=$normalizedId items=${detail.items.size}")
+        detail
+    }
+
+    suspend fun getMovieRankings(): List<TvMovieRanking> = withContext(Dispatchers.IO) {
+        movieRankingsCache?.let {
+            Log.d(TAG, "movie rankings cache hit: size=${it.size}")
+            return@withContext it
+        }
+        val response = api.get("/movie/ranking/list")
+        val rankings = response.extractMovieRankings()
+        movieRankingsCache = rankings
+        Log.d(TAG, "movie rankings loaded: size=${rankings.size}")
+        rankings
+    }
+
+    suspend fun getMovieRankingItems(rankingId: String): List<TvPosterItem> = withContext(Dispatchers.IO) {
+        val normalizedId = rankingId.trim()
+        if (normalizedId.isBlank()) return@withContext emptyList()
+        movieRankingItemsCache[normalizedId]?.let {
+            Log.d(TAG, "movie ranking items cache hit: id=$normalizedId size=${it.size}")
+            return@withContext it
+        }
+        val response = api.get("/movie/ranking/data", mapOf("id" to normalizedId))
+        val items = response.extractPosterItems()
+        movieRankingItemsCache[normalizedId] = items
+        Log.d(TAG, "movie ranking items loaded: id=$normalizedId size=${items.size}")
+        items
+    }
+
+    suspend fun getWeeklyMovies(weekDay: Int): List<TvPosterItem> = withContext(Dispatchers.IO) {
+        val normalizedDay = weekDay.coerceIn(1, 7)
+        weeklyMoviesCache[normalizedDay]?.let {
+            Log.d(TAG, "weekly movies cache hit: weekDay=$normalizedDay size=${it.size}")
+            return@withContext it
+        }
+        val response = api.get("/movie/weekly", mapOf("week_day" to normalizedDay))
+        val items = response.extractPosterItems()
+        weeklyMoviesCache[normalizedDay] = items
+        Log.d(TAG, "weekly movies loaded: weekDay=$normalizedDay size=${items.size}")
+        items
+    }
+
     suspend fun getEpisodes(movieId: String, fromCode: String): List<TvEpisode> = withContext(Dispatchers.IO) {
         val cacheKey = EpisodeCacheKey(movieId = movieId, fromCode = fromCode)
         episodesCache[cacheKey]?.let {
@@ -510,6 +598,156 @@ class TvRepository(
                 )
             }
         }
+    }
+
+    private fun JSONObject.extractPosterItems(): List<TvPosterItem> {
+        val data = opt("data")
+        return when (data) {
+            is JSONArray -> data.toPosterItems()
+            is JSONObject -> buildList {
+                addAll(data.optJSONArray("list").toPosterItems())
+                addAll(data.optJSONArray("items").toPosterItems())
+                addAll(data.optJSONArray("recommend").toPosterItems())
+                addAll(data.optJSONArray("data").toPosterItems())
+            }
+            else -> buildList {
+                addAll(optJSONArray("list").toPosterItems())
+                addAll(optJSONArray("items").toPosterItems())
+                addAll(optJSONArray("recommend").toPosterItems())
+            }
+        }.distinctBy { it.id }
+    }
+
+    private fun JSONObject.extractMovieTopics(): List<TvMovieTopic> {
+        return extractCollectionArray("topic", "topics", "list", "items", "data")
+            .toMovieTopics()
+    }
+
+    private fun JSONObject.extractMovieTopicDetail(): TvMovieTopic {
+        val data = optJSONObject("data") ?: this
+        return data.toMovieTopic() ?: TvMovieTopic(id = data.optString("id"), title = "专题")
+    }
+
+    private fun JSONObject.extractMovieRankings(): List<TvMovieRanking> {
+        return extractCollectionArray("ranking", "rankings", "list", "items", "data")
+            .toMovieRankings()
+    }
+
+    private fun JSONObject.extractCollectionArray(vararg keys: String): JSONArray? {
+        val data = opt("data")
+        if (data is JSONArray) return data
+        if (data is JSONObject) {
+            keys.forEach { key ->
+                data.optJSONArray(key)?.let { return it }
+            }
+        }
+        keys.forEach { key ->
+            optJSONArray(key)?.let { return it }
+        }
+        return null
+    }
+
+    private fun JSONArray?.toMovieTopics(): List<TvMovieTopic> {
+        if (this == null) return emptyList()
+        return buildList {
+            for (i in 0 until length()) {
+                val item = optJSONObject(i) ?: continue
+                item.toMovieTopic()?.let { add(it) }
+            }
+        }.distinctBy { it.id }
+    }
+
+    private fun JSONObject.toMovieTopic(): TvMovieTopic? {
+        val title = optString("name")
+            .ifBlank { optString("title") }
+            .ifBlank { optString("label") }
+        if (title.isBlank()) return null
+        val id = optString("id")
+            .ifBlank { optString("topic_id") }
+            .ifBlank { optString("type_id") }
+            .ifBlank { title }
+        val cover = optString("cover")
+            .ifBlank { optString("poster") }
+            .ifBlank { optString("image") }
+            .ifBlank { optString("pic") }
+        return TvMovieTopic(
+            id = id,
+            title = title,
+            coverUrl = normalizeImage(cover),
+            description = optString("description")
+                .ifBlank { optString("desc") }
+                .ifBlank { optString("content") },
+            movieCount = optInt("movie_count", 0),
+            viewCount = optString("view").ifBlank { optString("views") },
+            items = extractNestedPosterItems(),
+        )
+    }
+
+    private fun JSONArray?.toMovieRankings(): List<TvMovieRanking> {
+        if (this == null) return emptyList()
+        return buildList {
+            for (i in 0 until length()) {
+                val item = optJSONObject(i) ?: continue
+                val childRankings = item.extractNestedRankings()
+                if (childRankings.isNotEmpty()) {
+                    addAll(childRankings)
+                } else {
+                    item.toMovieRanking()?.let { add(it) }
+                }
+            }
+        }.distinctBy { it.id }
+    }
+
+    private fun JSONObject.toMovieRanking(): TvMovieRanking? {
+        val title = optString("name")
+            .ifBlank { optString("title") }
+            .ifBlank { optString("label") }
+        if (title.isBlank()) return null
+        val id = optString("id")
+            .ifBlank { optString("ranking_id") }
+            .ifBlank { optString("rank_id") }
+            .ifBlank { optString("type_id") }
+            .ifBlank { title }
+        return TvMovieRanking(
+            id = id,
+            title = title,
+            items = extractNestedPosterItems(),
+        )
+    }
+
+    private fun JSONObject.extractNestedRankings(): List<TvMovieRanking> {
+        val nestedArrays = listOf(
+            optJSONArray("list"),
+            optJSONArray("items"),
+            optJSONArray("ranking"),
+            optJSONArray("rankings"),
+            optJSONArray("children"),
+        )
+        return nestedArrays
+            .asSequence()
+            .filterNotNull()
+            .flatMap { array ->
+                sequence {
+                    for (i in 0 until array.length()) {
+                        val child = array.optJSONObject(i) ?: continue
+                        val ranking = child.toMovieRanking() ?: continue
+                        if (ranking.id.isNotBlank()) yield(ranking)
+                    }
+                }
+            }
+            .toList()
+            .distinctBy { it.id }
+    }
+
+    private fun JSONObject.extractNestedPosterItems(): List<TvPosterItem> {
+        return buildList {
+            addAll(optJSONArray("list").toPosterItems())
+            addAll(optJSONArray("items").toPosterItems())
+            addAll(optJSONArray("movies").toPosterItems())
+            addAll(optJSONArray("movie_list").toPosterItems())
+            addAll(optJSONArray("movie_data").toPosterItems())
+            addAll(optJSONArray("data").toPosterItems())
+        }.distinctBy { it.id }
     }
 
     private fun JSONArray?.toRecommendPosterItems(): List<TvPosterItem> {

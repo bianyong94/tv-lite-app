@@ -18,6 +18,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -68,6 +70,7 @@ fun DetailScreen(
     initialEpisodeIndex: Int = 0,
     initialPositionMs: Long = 0L,
     onBack: () -> Unit,
+    onOpenDetail: (String) -> Unit,
     onPlay: (title: String, movieId: String, sourceIndex: Int, episodeIndex: Int, positionMs: Long) -> Unit,
 ) {
     val statusHost = LocalTvStatusHostState.current
@@ -78,6 +81,8 @@ fun DetailScreen(
     var selectedEpisodeIndex by rememberSaveable(movieId) { mutableStateOf(0) }
     val episodesBySource = remember(movieId) { mutableStateMapOf<String, List<TvEpisode>>() }
     var episodesLoading by remember(movieId) { mutableStateOf(false) }
+    var recommendations by remember(movieId) { mutableStateOf<List<TvPosterItem>>(emptyList()) }
+    var recommendationsLoading by remember(movieId) { mutableStateOf(false) }
     
     val playFocusRequester = remember { FocusRequester() }
     val posterFocusRequester = remember { FocusRequester() }
@@ -97,6 +102,18 @@ fun DetailScreen(
         selectedSourceIndex = initialSourceIndex.coerceAtLeast(0)
         selectedEpisodeIndex = initialEpisodeIndex.coerceAtLeast(0)
         episodesBySource.clear()
+    }
+
+    LaunchedEffect(movieId) {
+        recommendations = emptyList()
+        recommendationsLoading = true
+        recommendations = try {
+            repository.getMovieRecommendations(movieId)
+        } catch (throwable: Throwable) {
+            Log.e(tag, "load recommendations failed: movieId=$movieId", throwable)
+            emptyList()
+        }
+        recommendationsLoading = false
     }
 
     LaunchedEffect(detail?.id) {
@@ -404,6 +421,130 @@ fun DetailScreen(
                     }
                 }
             }
+
+            if (recommendationsLoading || recommendations.isNotEmpty()) {
+                DetailRecommendationsRow(
+                    items = recommendations,
+                    loading = recommendationsLoading,
+                    onOpenDetail = onOpenDetail,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun DetailRecommendationsRow(
+    items: List<TvPosterItem>,
+    loading: Boolean,
+    onOpenDetail: (String) -> Unit,
+) {
+    Column(
+        verticalArrangement = Arrangement.spacedBy(14.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = "推荐资源",
+                style = MaterialTheme.typography.headlineMedium.copy(fontSize = 24.sp, fontWeight = FontWeight.Bold),
+            )
+            if (loading) {
+                Text(
+                    text = "正在加载...",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
+        }
+
+        LazyRow(
+            modifier = Modifier
+                .fillMaxWidth()
+                .focusGroup(),
+            horizontalArrangement = Arrangement.spacedBy(16.dp),
+            contentPadding = PaddingValues(horizontal = 4.dp, vertical = 6.dp),
+        ) {
+            items(items, key = { "${it.id}-${it.title}" }) { item ->
+                DetailRecommendationCard(
+                    item = item,
+                    onClick = {
+                        if (item.id.isNotBlank()) {
+                            onOpenDetail(item.id)
+                        }
+                    },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun DetailRecommendationCard(
+    item: TvPosterItem,
+    onClick: () -> Unit,
+) {
+    var focused by remember { mutableStateOf(false) }
+    val shape = RoundedCornerShape(14.dp)
+    Card(
+        onClick = onClick,
+        shape = shape,
+        colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.08f)),
+        modifier = Modifier
+            .width(132.dp)
+            .focusGroup()
+            .onFocusChanged { focused = it.isFocused }
+            .shadow(
+                elevation = if (focused) 14.dp else 2.dp,
+                shape = shape,
+                ambientColor = Color.Black.copy(alpha = 0.38f),
+                spotColor = if (focused) MaterialTheme.colorScheme.primary.copy(alpha = 0.28f) else Color.Black.copy(alpha = 0.18f),
+            )
+            .border(
+                width = if (focused) 2.dp else 1.dp,
+                color = if (focused) MaterialTheme.colorScheme.primary else Color.White.copy(alpha = 0.14f),
+                shape = shape,
+            ),
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(0.7f)
+                .clip(shape),
+        ) {
+            AsyncImage(
+                model = item.posterUrl.ifBlank { item.backdropUrl },
+                contentDescription = item.title,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
+            )
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(
+                        Brush.verticalGradient(
+                            0f to Color.Transparent,
+                            0.62f to Color.Transparent,
+                            1f to Color.Black.copy(alpha = 0.86f),
+                        ),
+                    ),
+            )
+            Text(
+                text = item.title,
+                style = MaterialTheme.typography.titleSmall.copy(
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 13.sp,
+                ),
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .padding(horizontal = 9.dp, vertical = 9.dp),
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
     }
 }

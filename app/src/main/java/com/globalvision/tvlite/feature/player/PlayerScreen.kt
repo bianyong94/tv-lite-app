@@ -161,6 +161,7 @@ fun PlayerScreen(
     var waitingForPlayableSource by remember { mutableStateOf(false) }
     var initialPlaybackTriggered by rememberSaveable(movieId) { mutableStateOf(false) }
     var playAttemptToken by remember { mutableIntStateOf(0) }
+    var autoAdvanceHandledForAttempt by remember { mutableIntStateOf(0) }
     var playbackLoadStartedAtMs by remember { mutableStateOf(0L) }
     var readyLoggedForAttempt by remember { mutableIntStateOf(0) }
     var seekStartedAtMs by remember { mutableStateOf(0L) }
@@ -280,6 +281,7 @@ fun PlayerScreen(
         parseFallbackAllowed = allowParseFallback
         parseFallbackAttempted = false
         playAttemptToken += 1
+        autoAdvanceHandledForAttempt = 0
         readyLoggedForAttempt = 0
         seekStartedAtMs = 0L
         Log.d(tag, "player prepare start: episode=${episode?.name.orEmpty()} allowParseFallback=$allowParseFallback url=${playUrl.take(96)}")
@@ -421,30 +423,42 @@ fun PlayerScreen(
                 durationMs = controller.durationMs()
                 when (playbackState) {
                     Player.STATE_IDLE -> waitingForPlayableSource = false
-                    Player.STATE_READY, Player.STATE_ENDED -> {
+                    Player.STATE_ENDED -> {
+                        val endedAttempt = playAttemptToken
+                        if (autoAdvanceHandledForAttempt != endedAttempt) {
+                            autoAdvanceHandledForAttempt = endedAttempt
+                            scope.launch {
+                                val advanced = playAdjacentEpisode(1)
+                                if (!advanced && playAttemptToken == endedAttempt) {
+                                    waitingForPlayableSource = false
+                                    loadingMessage = null
+                                    errorMessage = null
+                                }
+                            }
+                        }
+                    }
+                    Player.STATE_READY -> {
                         if (playbackState == Player.STATE_READY && shouldApplyPendingSeek && pendingSeekPositionMs > 0L) {
                             controller.seekTo(pendingSeekPositionMs)
                             shouldApplyPendingSeek = false
                         }
-                        if (playbackState == Player.STATE_READY) {
-                            if (readyLoggedForAttempt != playAttemptToken) {
-                                readyLoggedForAttempt = playAttemptToken
-                                val elapsedMs = (SystemClock.uptimeMillis() - playbackLoadStartedAtMs)
-                                    .takeIf { playbackLoadStartedAtMs > 0L }
-                                    ?: 0L
-                                Log.d(
-                                    tag,
-                                    "player startup ready: elapsed=${elapsedMs}ms buffered=${controller.bufferedPositionMs()} duration=${controller.durationMs()}",
-                                )
-                                controller.allowAdaptiveVideoQuality()
-                            } else if (seekStartedAtMs > 0L) {
-                                val seekElapsedMs = SystemClock.uptimeMillis() - seekStartedAtMs
-                                Log.d(
-                                    tag,
-                                    "player seek ready: elapsed=${seekElapsedMs}ms position=${controller.currentPositionMs()} buffered=${controller.bufferedPositionMs()}",
-                                )
-                                seekStartedAtMs = 0L
-                            }
+                        if (readyLoggedForAttempt != playAttemptToken) {
+                            readyLoggedForAttempt = playAttemptToken
+                            val elapsedMs = (SystemClock.uptimeMillis() - playbackLoadStartedAtMs)
+                                .takeIf { playbackLoadStartedAtMs > 0L }
+                                ?: 0L
+                            Log.d(
+                                tag,
+                                "player startup ready: elapsed=${elapsedMs}ms buffered=${controller.bufferedPositionMs()} duration=${controller.durationMs()}",
+                            )
+                            controller.allowAdaptiveVideoQuality()
+                        } else if (seekStartedAtMs > 0L) {
+                            val seekElapsedMs = SystemClock.uptimeMillis() - seekStartedAtMs
+                            Log.d(
+                                tag,
+                                "player seek ready: elapsed=${seekElapsedMs}ms position=${controller.currentPositionMs()} buffered=${controller.bufferedPositionMs()}",
+                            )
+                            seekStartedAtMs = 0L
                         }
                         waitingForPlayableSource = false
                         loadingMessage = null

@@ -2,8 +2,10 @@ package com.globalvision.tvlite.feature.home
 
 import android.app.Activity
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.focusGroup
@@ -18,14 +20,18 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -33,7 +39,6 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.FilterList
 import androidx.compose.material.icons.filled.History
-import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material3.AlertDialog
@@ -85,24 +90,23 @@ import com.globalvision.tvlite.feature.common.LocalTvStatusHostState
 import com.globalvision.tvlite.feature.common.TvFeedbackPanel
 import com.globalvision.tvlite.feature.common.TvLoadingPanel
 import com.globalvision.tvlite.feature.common.consumeRepeatedDpadEvents
-import com.globalvision.tvlite.feature.common.ensureVisibleOnFocus
 import com.globalvision.tvlite.feature.common.tvFocusBorder
 import com.globalvision.tvlite.ui.theme.TvDivider
 import com.globalvision.tvlite.ui.theme.TvV2FocusGlow
-import com.globalvision.tvlite.ui.theme.TvV2HeroScrim
 import com.globalvision.tvlite.ui.theme.TvV2MaterialSurface
 import com.globalvision.tvlite.ui.theme.TvV2MaterialSurfaceFocused
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 private const val V2_PAGE_SIZE = 30
-private const val V2_SHELF_VISIBLE_LIMIT = 12
+private const val V2_HERO_RAIL_VISIBLE_LIMIT = 8
+private const val V2_SHELF_VISIBLE_LIMIT = 8
 private val V2ScreenHorizontalPadding = 64.dp
 private val V2CardBleedPadding = 8.dp
 
 private enum class HomeV2FocusLayer {
     TopBar,
-    Hero,
+    Filters, // 新增 Filter 层
     HeroRail,
     Shelf,
 }
@@ -126,16 +130,19 @@ fun HomeV2Screen(
     var contentPage by remember { mutableIntStateOf(1) }
     var hasMoreContent by remember { mutableStateOf(true) }
     var loadingMoreContent by remember { mutableStateOf(false) }
-    var focusLayer by remember { mutableStateOf(HomeV2FocusLayer.Hero) }
+    var focusLayer by remember { mutableStateOf(HomeV2FocusLayer.HeroRail) }
+    var previewBackdropItem by remember { mutableStateOf<TvPosterItem?>(null) }
     var showFilterOverlay by remember { mutableStateOf(false) }
     var showExitDialog by remember { mutableStateOf(false) }
     val filtersByNavId = remember { mutableStateMapOf<Int, HomeV2TopicFilters>() }
     val screenCache = remember { mutableStateMapOf<HomeV2ScreenQueryKey, HomeV2CachedScreenContent>() }
 
+    // 焦点管理
     val tabFocusRequester = remember { FocusRequester() }
-    val heroFocusRequester = remember { FocusRequester() }
+    val filtersFocusRequester = remember { FocusRequester() }
     val heroRailFocusRequester = remember { FocusRequester() }
     val firstShelfFocusRequester = remember { FocusRequester() }
+    val heroRailListState = rememberLazyListState()
 
     val navItems = remember(feedState) {
         buildHomeV2NavItems(feedState?.config?.topNav.orEmpty())
@@ -176,23 +183,14 @@ fun HomeV2Screen(
                 )
             } catch (_: Throwable) {
                 statusHost?.show("加载更多失败", "当前网络较慢，稍后再试。", timeoutMs = 2600L)
-                TvRepository.ScreenMoviesResult(
-                    items = emptyList(),
-                    nextPage = pageToLoad,
-                    hasMore = true,
-                    total = 0,
-                )
+                TvRepository.ScreenMoviesResult(items = emptyList(), nextPage = pageToLoad, hasMore = true, total = 0)
             }
             val nextItems = if (result.items.isNotEmpty()) contentItems + result.items else contentItems
             contentItems = nextItems
             hasMoreContent = result.items.isNotEmpty() && result.hasMore
             contentPage = result.nextPage
             loadingMoreContent = false
-            screenCache[contentQueryKey] = HomeV2CachedScreenContent(
-                items = nextItems,
-                nextPage = contentPage,
-                hasMore = hasMoreContent,
-            )
+            screenCache[contentQueryKey] = HomeV2CachedScreenContent(nextItems, contentPage, hasMoreContent)
         }
     }
 
@@ -203,11 +201,7 @@ fun HomeV2Screen(
             return@LaunchedEffect
         }
         loadingFeed = true
-        feedState = try {
-            repository.getHomeFeed()
-        } catch (_: Throwable) {
-            null
-        }
+        feedState = try { repository.getHomeFeed() } catch (_: Throwable) { null }
         loadingFeed = false
     }
 
@@ -216,16 +210,12 @@ fun HomeV2Screen(
         if (activeNavId !in availableNavIds) {
             activeNavId = navItems.firstOrNull()?.id ?: 0
         }
-        delay(80)
-        heroFocusRequester.requestFocus()
     }
 
     LaunchedEffect(feedState, activeNavId, topicFilters) {
         val feed = feedState ?: return@LaunchedEffect
         if (activeNavId == 0) {
-            val recommendItems = feed.banners
-                .plus(feed.sections.flatMap { it.items })
-                .distinctBy { it.id }
+            val recommendItems = feed.banners.plus(feed.sections.flatMap { it.items }).distinctBy { it.id }
             contentItems = recommendItems
             contentLoading = false
             contentPage = 1
@@ -266,11 +256,46 @@ fun HomeV2Screen(
         contentLoading = false
         hasMoreContent = result.hasMore
         contentPage = result.nextPage
-        screenCache[contentQueryKey] = HomeV2CachedScreenContent(
-            items = result.items,
-            nextPage = result.nextPage,
-            hasMore = result.hasMore,
-        )
+        screenCache[contentQueryKey] = HomeV2CachedScreenContent(result.items, result.nextPage, result.hasMore)
+    }
+
+    val feed = feedState
+    val isCategoryPage = activeNavId != 0
+    val showFilters = isCategoryPage && activeFilterGroup != null
+    // 分类页去掉重复的 HeroRail
+    val heroRailItems = if (feed == null) emptyList() else buildHomeV2HeroRailItems(feed, activeNavId)
+    val hasHeroRail = heroRailItems.isNotEmpty()
+    val heroItem = if (feed == null) null else buildHomeV2HeroItem(feed, activeNavId, contentItems)
+    
+    // 只给“推荐”页渲染 Shelf，分类页改用 Grid 呈现避免资源重复
+    val shelves = if (feed == null || isCategoryPage) emptyList() else buildHomeV2Shelves(feed, contentItems)
+
+    val targetDownFocusFromTop = remember(showFilters, hasHeroRail) {
+        if (showFilters) filtersFocusRequester
+        else if (hasHeroRail) heroRailFocusRequester
+        else firstShelfFocusRequester
+    }
+
+    val upFocusForContent = remember(hasHeroRail, showFilters) {
+        if (hasHeroRail) heroRailFocusRequester
+        else if (showFilters) filtersFocusRequester
+        else tabFocusRequester
+    }
+
+    LaunchedEffect(activeNavId, heroItem?.id) {
+        previewBackdropItem = heroItem
+    }
+
+    LaunchedEffect(activeNavId, heroRailItems.firstOrNull()?.id, shelves.firstOrNull()?.title) {
+        delay(80)
+        if (hasHeroRail) {
+            heroRailListState.scrollToItem(0)
+            heroRailFocusRequester.requestFocus()
+        } else if (showFilters) {
+            filtersFocusRequester.requestFocus()
+        } else {
+            firstShelfFocusRequester.requestFocus()
+        }
     }
 
     BackHandler(enabled = showExitDialog) {
@@ -280,13 +305,14 @@ fun HomeV2Screen(
         when (focusLayer) {
             HomeV2FocusLayer.Shelf -> scope.launch {
                 delay(32)
-                heroRailFocusRequester.requestFocus()
+                upFocusForContent.requestFocus()
             }
             HomeV2FocusLayer.HeroRail -> scope.launch {
                 delay(32)
-                heroFocusRequester.requestFocus()
+                if (showFilters) filtersFocusRequester.requestFocus()
+                else tabFocusRequester.requestFocus()
             }
-            HomeV2FocusLayer.Hero -> scope.launch {
+            HomeV2FocusLayer.Filters -> scope.launch {
                 delay(32)
                 tabFocusRequester.requestFocus()
             }
@@ -337,9 +363,7 @@ fun HomeV2Screen(
 
     when {
         loadingFeed && feedState == null -> {
-            HomeV2Shell {
-                TvLoadingPanel(message = "正在准备新版首页...", centered = true)
-            }
+            HomeV2Shell { TvLoadingPanel(message = "正在准备新版首页...", centered = true) }
             return
         }
         feedState == null -> {
@@ -360,12 +384,7 @@ fun HomeV2Screen(
         }
     }
 
-    val feed = feedState ?: return
-    val heroItem = buildHomeV2HeroItem(feed, activeNavId, contentItems)
-    val heroRailItems = buildHomeV2HeroRailItems(feed, activeNavId, heroItem, contentItems)
-    val shelves = buildHomeV2Shelves(feed, activeNavId, activeNav?.name.orEmpty(), contentItems)
-
-    HomeV2Shell(backdropItem = heroItem) {
+    HomeV2Shell(backdropItem = previewBackdropItem ?: heroItem) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -377,7 +396,7 @@ fun HomeV2Screen(
                 navItems = navItems,
                 activeNavId = activeNavId,
                 firstTabFocusRequester = tabFocusRequester,
-                heroFocusRequester = heroFocusRequester,
+                targetDownFocusRequester = targetDownFocusFromTop,
                 onTabFocus = { focusLayer = HomeV2FocusLayer.TopBar },
                 onSelectNav = { item ->
                     activeNavId = item.id
@@ -388,39 +407,6 @@ fun HomeV2Screen(
                 onBackToLegacy = onBackToLegacy,
             )
 
-            if (heroItem != null) {
-                HomeV2Hero(
-                    item = heroItem,
-                    focusRequester = heroFocusRequester,
-                    downFocusRequester = heroRailFocusRequester.takeIf { heroRailItems.isNotEmpty() } ?: firstShelfFocusRequester,
-                    onFocused = { focusLayer = HomeV2FocusLayer.Hero },
-                    onOpenDetail = { onOpenDetail(heroItem.id) },
-                    onSearch = onSearch,
-                )
-            }
-
-            if (activeNavId != 0 && activeFilterGroup != null) {
-                HomeV2FilterSummaryRow(
-                    filters = topicFilters,
-                    hasAdvancedFilters = activeFilterGroup.hasAdvancedFilters(),
-                    onOpenFilters = { showFilterOverlay = true },
-                    onSortChange = { next ->
-                        filtersByNavId[activeNavId] = topicFilters.copy(sort = next)
-                    },
-                )
-            }
-
-            if (heroRailItems.isNotEmpty()) {
-                HomeV2HeroRail(
-                    items = heroRailItems,
-                    entryFocusRequester = heroRailFocusRequester,
-                    upFocusRequester = heroFocusRequester,
-                    downFocusRequester = firstShelfFocusRequester,
-                    onFocused = { focusLayer = HomeV2FocusLayer.HeroRail },
-                    onOpenDetail = onOpenDetail,
-                )
-            }
-
             Box(modifier = Modifier.weight(1f)) {
                 when {
                     contentLoading && contentItems.isEmpty() -> {
@@ -430,7 +416,7 @@ fun HomeV2Screen(
                             modifier = Modifier.align(Alignment.Center),
                         )
                     }
-                    !contentLoading && shelves.isEmpty() -> {
+                    !contentLoading && shelves.isEmpty() && contentItems.isEmpty() -> {
                         TvFeedbackPanel(
                             title = "当前没有可展示内容",
                             message = "可以切换栏目或调整筛选条件后重试。",
@@ -442,27 +428,110 @@ fun HomeV2Screen(
                                 .fillMaxSize()
                                 .focusGroup(),
                             verticalArrangement = Arrangement.spacedBy(16.dp),
-                            contentPadding = PaddingValues(bottom = 52.dp, top = 0.dp),
+                            contentPadding = PaddingValues(bottom = 52.dp, top = 2.dp),
                         ) {
-                            items(shelves, key = { it.title }) { shelf ->
-                                val isFirstShelf = shelves.firstOrNull()?.title == shelf.title
-                                HomeV2Shelf(
-                                    shelf = shelf,
-                                    entryFocusRequester = if (isFirstShelf) firstShelfFocusRequester else null,
-                                    upFocusRequester = if (isFirstShelf) {
-                                        heroRailFocusRequester.takeIf { heroRailItems.isNotEmpty() } ?: heroFocusRequester
-                                    } else {
-                                        null
-                                    },
-                                    onFocused = { focusLayer = HomeV2FocusLayer.Shelf },
-                                    onOpenDetail = onOpenDetail,
-                                    onLoadMore = if (activeNavId == 0 || !hasMoreContent) {
-                                        null
-                                    } else {
-                                        { requestNextContentPage() }
-                                    },
-                                    loadingMore = loadingMoreContent,
-                                )
+                            if (heroItem != null) {
+                                item(key = "hero") {
+                                    HomeV2Hero(item = heroItem)
+                                }
+                            }
+
+                            if (showFilters) {
+                                item(key = "filters") {
+                                    HomeV2FilterSummaryRow(
+                                        filters = topicFilters,
+                                        hasAdvancedFilters = activeFilterGroup!!.hasAdvancedFilters(),
+                                        modifier = Modifier
+                                            .focusRequester(filtersFocusRequester)
+                                            .focusProperties {
+                                                up = tabFocusRequester
+                                                down = if (hasHeroRail) heroRailFocusRequester else firstShelfFocusRequester
+                                            },
+                                        onOpenFilters = { showFilterOverlay = true },
+                                        onSortChange = { next ->
+                                            filtersByNavId[activeNavId] = topicFilters.copy(sort = next)
+                                        },
+                                        onFocused = { focusLayer = HomeV2FocusLayer.Filters }
+                                    )
+                                }
+                            }
+
+                            if (hasHeroRail) {
+                                item(key = "hero_rail") {
+                                    HomeV2HeroRail(
+                                        items = heroRailItems,
+                                        listState = heroRailListState,
+                                        entryFocusRequester = heroRailFocusRequester,
+                                        upFocusRequester = if (showFilters) filtersFocusRequester else tabFocusRequester,
+                                        downFocusRequester = firstShelfFocusRequester,
+                                        onFocused = { item ->
+                                            focusLayer = HomeV2FocusLayer.HeroRail
+                                            previewBackdropItem = item
+                                        },
+                                        onOpenDetail = onOpenDetail,
+                                    )
+                                }
+                            }
+
+                            // 推荐页的多层架子展示
+                            if (!isCategoryPage) {
+                                items(shelves, key = { it.title }) { shelf ->
+                                    val isFirstShelf = shelves.firstOrNull()?.title == shelf.title
+                                    HomeV2Shelf(
+                                        shelf = shelf,
+                                        entryFocusRequester = if (isFirstShelf) firstShelfFocusRequester else null,
+                                        upFocusRequester = if (isFirstShelf) upFocusForContent else null,
+                                        onFocused = { focusLayer = HomeV2FocusLayer.Shelf },
+                                        onOpenDetail = onOpenDetail,
+                                    )
+                                }
+                            }
+
+                            // 分类页网格呈现，防止单行无限长
+                            if (isCategoryPage && contentItems.isNotEmpty()) {
+                                val chunked = contentItems.distinctBy { it.id }.chunked(7)
+                                itemsIndexed(chunked, key = { index, _ -> "grid_row_$index" }) { rowIndex, rowItems ->
+                                    val isFirstRow = rowIndex == 0
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = V2CardBleedPadding)
+                                            .focusGroup()
+                                            .then(if (isFirstRow) Modifier.focusProperties { up = upFocusForContent } else Modifier),
+                                        horizontalArrangement = Arrangement.spacedBy(16.dp),
+                                    ) {
+                                        rowItems.forEachIndexed { colIndex, item ->
+                                            val isFirstItem = isFirstRow && colIndex == 0
+                                            HomeV2PosterCard(
+                                                item = item,
+                                                modifier = Modifier
+                                                    .then(if (isFirstItem) Modifier.focusRequester(firstShelfFocusRequester) else Modifier),
+                                                onFocused = {
+                                                    focusLayer = HomeV2FocusLayer.Shelf
+                                                    previewBackdropItem = item
+                                                },
+                                                onClick = { onOpenDetail(item.id) },
+                                            )
+                                        }
+                                    }
+                                }
+
+                                if (hasMoreContent) {
+                                    item(key = "load_more") {
+                                        Box(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(top = 16.dp, bottom = 32.dp),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            HomeV2MoreCard(
+                                                loading = loadingMoreContent,
+                                                onFocused = { focusLayer = HomeV2FocusLayer.Shelf },
+                                                onClick = { requestNextContentPage() }
+                                            )
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -482,37 +551,20 @@ private fun HomeV2Shell(
             .fillMaxSize()
             .background(Color(0xFF05070B)),
     ) {
-        AsyncImage(
-            model = backdropItem?.backdropUrl?.ifBlank { backdropItem.posterUrl },
-            contentDescription = null,
-            contentScale = ContentScale.Crop,
-            modifier = Modifier
-                .fillMaxSize()
-                .graphicsLayer { alpha = if (backdropItem == null) 0f else 0.52f },
-        )
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(
-                    Brush.verticalGradient(
-                        0f to Color.Black.copy(alpha = 0.72f),
-                        0.42f to Color.Black.copy(alpha = 0.28f),
-                        0.72f to TvV2HeroScrim,
-                        1f to Color(0xFF05070B),
-                    ),
-                ),
-        )
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(
-                    Brush.horizontalGradient(
-                        0f to Color.Black.copy(alpha = 0.85f),
-                        0.42f to Color.Transparent,
-                        1f to Color.Black.copy(alpha = 0.46f),
-                    ),
-                ),
-        )
+        Crossfade(
+            targetState = backdropItem,
+            animationSpec = tween(durationMillis = 420),
+            label = "home_v2_backdrop_crossfade",
+        ) { item ->
+            AsyncImage(
+                model = item?.backdropUrl?.ifBlank { item.posterUrl },
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer { alpha = if (item == null) 0f else 1f },
+            )
+        }
         content()
     }
 }
@@ -522,7 +574,7 @@ private fun HomeV2TopBar(
     navItems: List<TvNavItem>,
     activeNavId: Int,
     firstTabFocusRequester: FocusRequester,
-    heroFocusRequester: FocusRequester,
+    targetDownFocusRequester: FocusRequester,
     onTabFocus: () -> Unit,
     onSelectNav: (TvNavItem) -> Unit,
     onSearch: () -> Unit,
@@ -532,7 +584,7 @@ private fun HomeV2TopBar(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .height(48.dp),
+            .height(58.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -540,7 +592,8 @@ private fun HomeV2TopBar(
             modifier = Modifier
                 .weight(1f)
                 .horizontalScroll(rememberScrollState())
-                .focusGroup(),
+                .focusGroup()
+                .focusProperties { down = targetDownFocusRequester },
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -549,9 +602,7 @@ private fun HomeV2TopBar(
                 HomeV2TabChip(
                     text = item.name,
                     selected = item.id == activeNavId,
-                    modifier = Modifier
-                        .then(if (isFirst) Modifier.focusRequester(firstTabFocusRequester) else Modifier)
-                        .focusProperties { down = heroFocusRequester },
+                    modifier = if (isFirst) Modifier.focusRequester(firstTabFocusRequester) else Modifier,
                     onFocused = onTabFocus,
                     onClick = { onSelectNav(item) },
                 )
@@ -561,6 +612,9 @@ private fun HomeV2TopBar(
         Spacer(modifier = Modifier.width(14.dp))
 
         Row(
+            modifier = Modifier
+                .focusGroup()
+                .focusProperties { down = targetDownFocusRequester },
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -589,21 +643,16 @@ private fun HomeV2TopBar(
 @Composable
 private fun HomeV2Hero(
     item: TvPosterItem,
-    focusRequester: FocusRequester,
-    downFocusRequester: FocusRequester,
-    onFocused: () -> Unit,
-    onOpenDetail: () -> Unit,
-    onSearch: () -> Unit,
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .height(120.dp),
+            .height(268.dp),
         verticalAlignment = Alignment.Bottom,
     ) {
         Column(
             modifier = Modifier
-                .widthIn(max = 680.dp) // 拓宽文字安全区
+                .widthIn(max = 680.dp)
                 .fillMaxHeight(),
             verticalArrangement = Arrangement.Bottom,
         ) {
@@ -612,42 +661,23 @@ private fun HomeV2Hero(
                 style = MaterialTheme.typography.displaySmall.copy(
                     color = Color.White,
                     fontWeight = FontWeight.Black,
-                    fontSize = 30.sp,
+                    fontSize = 36.sp,
                 ),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
             Spacer(modifier = Modifier.height(5.dp))
-            Text(
-                text = buildHeroSubtitle(item),
-                style = MaterialTheme.typography.titleMedium.copy(
-                    color = Color.White.copy(alpha = 0.78f),
-                    fontWeight = FontWeight.Medium,
-                    fontSize = 14.sp,
-                ),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            Spacer(modifier = Modifier.height(12.dp))
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                HomeV2ActionChip(
-                    text = "查看详情",
-                    icon = { Icon(Icons.Default.PlayArrow, contentDescription = null) },
-                    modifier = Modifier
-                        .focusRequester(focusRequester)
-                        .focusProperties { down = downFocusRequester },
-                    primary = true,
-                    onFocused = onFocused,
-                    onClick = onOpenDetail,
-                )
-                HomeV2ActionChip(
-                    text = "搜索相关",
-                    icon = { Icon(Icons.Default.Search, contentDescription = null) },
-                    onFocused = onFocused,
-                    onClick = onSearch,
+            val subtitle = buildHeroSubtitle(item)
+            if (subtitle.isNotBlank()) {
+                Text(
+                    text = subtitle,
+                    style = MaterialTheme.typography.titleMedium.copy(
+                        color = Color.White.copy(alpha = 0.78f),
+                        fontWeight = FontWeight.Medium,
+                        fontSize = 17.sp,
+                    ),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
             }
         }
@@ -659,11 +689,15 @@ private fun HomeV2Hero(
 private fun HomeV2FilterSummaryRow(
     filters: HomeV2TopicFilters,
     hasAdvancedFilters: Boolean,
+    modifier: Modifier = Modifier,
     onOpenFilters: () -> Unit,
     onSortChange: (String) -> Unit,
+    onFocused: () -> Unit,
 ) {
     Row(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = modifier
+            .fillMaxWidth()
+            .focusGroup(),
         horizontalArrangement = Arrangement.spacedBy(12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -671,7 +705,7 @@ private fun HomeV2FilterSummaryRow(
             HomeV2TabChip(
                 text = sortLabel(sort),
                 selected = filters.sort.ifBlank { "by_default" } == sort,
-                onFocused = {},
+                onFocused = onFocused,
                 onClick = { onSortChange(sort) },
             )
         }
@@ -679,6 +713,7 @@ private fun HomeV2FilterSummaryRow(
             HomeV2ActionChip(
                 text = "高级筛选",
                 icon = { Icon(Icons.Default.FilterList, contentDescription = null) },
+                onFocused = onFocused,
                 onClick = onOpenFilters,
             )
         }
@@ -698,22 +733,24 @@ private fun HomeV2FilterSummaryRow(
 @Composable
 private fun HomeV2HeroRail(
     items: List<TvPosterItem>,
+    listState: LazyListState,
     entryFocusRequester: FocusRequester,
     upFocusRequester: FocusRequester,
     downFocusRequester: FocusRequester,
-    onFocused: () -> Unit,
+    onFocused: (TvPosterItem) -> Unit,
     onOpenDetail: (String) -> Unit,
 ) {
     LazyRow(
         modifier = Modifier
             .fillMaxWidth()
-            .height(96.dp)
+            .height(134.dp)
             .focusGroup(),
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        state = listState,
+        horizontalArrangement = Arrangement.spacedBy(16.dp),
         contentPadding = PaddingValues(horizontal = V2CardBleedPadding, vertical = V2CardBleedPadding),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        items(items.take(5), key = { it.id }) { item ->
+        items(items.take(V2_HERO_RAIL_VISIBLE_LIMIT), key = { it.id }) { item ->
             val isFirst = items.firstOrNull()?.id == item.id
             HomeV2WideCard(
                 item = item,
@@ -723,7 +760,7 @@ private fun HomeV2HeroRail(
                         up = upFocusRequester
                         down = downFocusRequester
                     },
-                onFocused = onFocused,
+                onFocused = { onFocused(item) },
                 onClick = { onOpenDetail(item.id) },
             )
         }
@@ -737,8 +774,6 @@ private fun HomeV2Shelf(
     upFocusRequester: FocusRequester?,
     onFocused: () -> Unit,
     onOpenDetail: (String) -> Unit,
-    onLoadMore: (() -> Unit)?,
-    loadingMore: Boolean,
 ) {
     Column(
         modifier = Modifier.fillMaxWidth(),
@@ -748,18 +783,18 @@ private fun HomeV2Shelf(
             style = MaterialTheme.typography.titleLarge.copy(
                 color = Color.White,
                 fontWeight = FontWeight.ExtraBold,
-                fontSize = 17.sp,
+                fontSize = 20.sp,
             ),
-            modifier = Modifier.padding(bottom = 4.dp, start = V2CardBleedPadding),
+            modifier = Modifier.padding(bottom = 6.dp, start = V2CardBleedPadding),
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
         LazyRow(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(156.dp)
+                .height(212.dp)
                 .focusGroup(),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            horizontalArrangement = Arrangement.spacedBy(16.dp),
             contentPadding = PaddingValues(horizontal = V2CardBleedPadding, vertical = V2CardBleedPadding),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -773,15 +808,6 @@ private fun HomeV2Shelf(
                     onFocused = onFocused,
                     onClick = { onOpenDetail(item.id) },
                 )
-            }
-            if (onLoadMore != null) {
-                item {
-                    HomeV2MoreCard(
-                        loading = loadingMore,
-                        onFocused = onFocused,
-                        onClick = onLoadMore,
-                    )
-                }
             }
         }
     }
@@ -806,9 +832,8 @@ private fun HomeV2PosterCard(
         shape = shape,
         colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.08f)),
         modifier = modifier
-            .width(82.dp)
+            .width(122.dp)
             .consumeRepeatedDpadEvents()
-            .ensureVisibleOnFocus()
             .onFocusChanged {
                 focused = it.isFocused
                 if (it.isFocused) onFocused()
@@ -870,7 +895,7 @@ private fun HomeV2PosterCard(
                 style = MaterialTheme.typography.titleSmall.copy(
                     color = Color.White.copy(alpha = if (focused) 1f else 0.9f),
                     fontWeight = if (focused) FontWeight.ExtraBold else FontWeight.Bold,
-                    fontSize = 12.sp,
+                    fontSize = 14.sp,
                 ),
                 modifier = Modifier
                     .align(Alignment.BottomStart)
@@ -901,10 +926,9 @@ private fun HomeV2WideCard(
         shape = shape,
         colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.08f)),
         modifier = modifier
-            .width(144.dp)
+            .width(196.dp)
             .aspectRatio(1.77f)
             .consumeRepeatedDpadEvents()
-            .ensureVisibleOnFocus()
             .onFocusChanged {
                 focused = it.isFocused
                 if (it.isFocused) onFocused()
@@ -943,7 +967,7 @@ private fun HomeV2WideCard(
                 style = MaterialTheme.typography.titleMedium.copy(
                     color = Color.White,
                     fontWeight = FontWeight.Bold,
-                    fontSize = 12.sp,
+                    fontSize = 15.sp,
                 ),
                 modifier = Modifier
                     .align(Alignment.BottomStart)
@@ -964,7 +988,7 @@ private fun HomeV2MoreCard(
     HomeV2ActionCard(
         text = if (loading) "加载中..." else "查看更多",
         modifier = Modifier
-            .width(82.dp)
+            .width(122.dp)
             .aspectRatio(0.66f),
         onFocused = onFocused,
         onClick = onClick,
@@ -1005,7 +1029,7 @@ private fun HomeV2ActionCard(
         Box(contentAlignment = Alignment.Center) {
             Text(
                 text = text,
-                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold, fontSize = 12.sp),
+                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold, fontSize = 14.sp),
                 maxLines = 1,
             )
         }
@@ -1022,11 +1046,6 @@ private fun HomeV2TabChip(
 ) {
     var focused by remember { mutableStateOf(false) }
     val shape = CircleShape
-    val scale by animateFloatAsState(
-        targetValue = if (focused) 1.035f else 1f,
-        animationSpec = spring(dampingRatio = 0.82f, stiffness = 420f),
-        label = "home_v2_tab_scale",
-    )
     Surface(
         onClick = onClick,
         shape = shape,
@@ -1041,24 +1060,21 @@ private fun HomeV2TabChip(
             else -> Color.White.copy(alpha = 0.65f)
         },
         modifier = modifier
+            .heightIn(min = 42.dp)
             .consumeRepeatedDpadEvents()
             .onFocusChanged {
                 focused = it.isFocused
                 if (it.isFocused) onFocused()
-            }
-            .graphicsLayer {
-                scaleX = scale
-                scaleY = scale
             }
             .shadow(if (focused) 8.dp else 0.dp, shape, spotColor = TvV2FocusGlow),
     ) {
         Text(
             text = text,
             style = MaterialTheme.typography.titleMedium.copy(
-                fontWeight = if (selected || focused) FontWeight.ExtraBold else FontWeight.Bold,
-                fontSize = 14.sp,
+                fontWeight = FontWeight.Bold, // 修正：无论焦点如何，始终保持相同的字重，避免改变物理宽度导致滚动条抖动
+                fontSize = 15.sp,
             ),
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp),
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 9.dp),
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
@@ -1118,7 +1134,7 @@ private fun HomeV2ActionChip(
             Box(modifier = Modifier.size(18.dp), contentAlignment = Alignment.Center) { icon() }
             Text(
                 text = text,
-                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold, fontSize = 13.sp),
+                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold, fontSize = 14.sp),
                 maxLines = 1,
             )
         }
@@ -1128,6 +1144,7 @@ private fun HomeV2ActionChip(
 @Composable
 private fun HomeV2IconButton(
     icon: @Composable () -> Unit,
+    modifier: Modifier = Modifier,
     onFocused: () -> Unit,
     onClick: () -> Unit,
 ) {
@@ -1142,7 +1159,7 @@ private fun HomeV2IconButton(
         shape = CircleShape,
         color = if (focused) TvV2MaterialSurfaceFocused else TvV2MaterialSurface,
         contentColor = if (focused) Color(0xFF10141A) else Color.White.copy(alpha = 0.9f),
-        modifier = Modifier
+        modifier = modifier
             .size(38.dp)
             .consumeRepeatedDpadEvents()
             .onFocusChanged {
@@ -1170,7 +1187,7 @@ private fun HomeV2FilterOverlay(
 ) {
     Dialog(onDismissRequest = onDismiss) {
         Surface(
-            color = Color(0xF20B1018), // 略微增加不透明度加强毛玻璃视感
+            color = Color(0xF20B1018),
             shape = RoundedCornerShape(28.dp),
             modifier = Modifier
                 .fillMaxWidth(0.88f)
@@ -1219,7 +1236,9 @@ private fun HomeV2FilterOverlay(
                     )
                 }
                 Row(
-                    modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 12.dp),
                     horizontalArrangement = Arrangement.End,
                 ) {
                     HomeV2ActionChip(
@@ -1246,7 +1265,7 @@ private fun HomeV2FilterRow(
             text = label,
             style = MaterialTheme.typography.titleMedium.copy(
                 color = Color.White.copy(alpha = 0.85f),
-                fontWeight = FontWeight.ExtraBold,
+                fontWeight = FontWeight.Bold,
             ),
         )
         LazyRow(
@@ -1333,35 +1352,18 @@ private fun buildHomeV2HeroItem(
 private fun buildHomeV2HeroRailItems(
     feed: TvHomeFeed,
     activeNavId: Int,
-    heroItem: TvPosterItem?,
-    contentItems: List<TvPosterItem>,
 ): List<TvPosterItem> {
-    val source = if (activeNavId == 0) {
-        feed.banners.plus(feed.sections.flatMap { it.items })
-    } else {
-        contentItems
-    }
-    return source
-        .distinctBy { it.id }
-        .filter { it.id != heroItem?.id }
-        .take(5)
+    // 修复：分类页禁止拉取 HeroRail，否则它会和底部的 Grid 内容发生 100% 重复！
+    if (activeNavId != 0) return emptyList() 
+    
+    val source = feed.banners.plus(feed.sections.flatMap { it.items })
+    return source.distinctBy { it.id }.take(V2_HERO_RAIL_VISIBLE_LIMIT)
 }
 
 private fun buildHomeV2Shelves(
     feed: TvHomeFeed,
-    activeNavId: Int,
-    activeNavName: String,
     contentItems: List<TvPosterItem>,
 ): List<HomeV2ShelfModel> {
-    if (activeNavId != 0) {
-        return if (contentItems.isEmpty()) emptyList() else listOf(
-            HomeV2ShelfModel(
-                title = activeNavName.ifBlank { "当前栏目" },
-                items = contentItems.distinctBy { it.id },
-            ),
-        )
-    }
-
     val serverShelves = feed.sections
         .mapNotNull { section ->
             val items = section.items.distinctBy { it.id }
@@ -1378,7 +1380,8 @@ private fun buildHeroSubtitle(item: TvPosterItem): String {
     return listOf(item.year, item.category, item.score.takeIf { it.isNotBlank() }?.let { "评分 $it" })
         .filterNotNull()
         .filter { it.isNotBlank() }
-        .ifEmpty { listOf(item.remark.ifBlank { item.overview.ifBlank { "精选内容" } }) }
+        .ifEmpty { listOf(item.remark.ifBlank { item.overview.takeIf { it.isNotBlank() } }) }
+        .filterNotNull()
         .joinToString(" · ")
 }
 

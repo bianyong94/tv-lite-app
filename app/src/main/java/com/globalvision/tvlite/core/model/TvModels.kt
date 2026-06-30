@@ -43,6 +43,22 @@ data class TvHomeFeed(
     val sections: List<TvHomeSection>,
 )
 
+data class TvMovieTopic(
+    val id: String,
+    val title: String,
+    val coverUrl: String = "",
+    val description: String = "",
+    val movieCount: Int = 0,
+    val viewCount: String = "",
+    val items: List<TvPosterItem> = emptyList(),
+)
+
+data class TvMovieRanking(
+    val id: String,
+    val title: String,
+    val items: List<TvPosterItem> = emptyList(),
+)
+
 data class TvEpisode(
     val episodeId: Int,
     val name: String,

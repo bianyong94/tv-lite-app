@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
@@ -80,6 +81,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
 import com.globalvision.tvlite.core.model.TvFilterGroup
 import com.globalvision.tvlite.core.model.TvHomeFeed
+import com.globalvision.tvlite.core.model.TvMovieRanking
 import com.globalvision.tvlite.core.model.TvNavItem
 import com.globalvision.tvlite.core.model.TvPosterItem
 import com.globalvision.tvlite.core.network.TvRepository
@@ -97,6 +99,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.distinctUntilChanged
 
 private const val PAGE_SIZE = 30
+private const val NAV_ID_RANKING = -101
+private const val NAV_ID_WEEKLY = -102
 // 调大 Filter 芯片高度，使其在大屏更有存在感
 private val FilterChipHeight = 32.dp
 private val FilterChipShape = RoundedCornerShape(10.dp) // Apple 偏向富有几何感的圆角
@@ -111,7 +115,7 @@ fun HomeScreen(
     repository: TvRepository,
     onSearch: () -> Unit,
     onHistory: () -> Unit,
-    onOpenHomeV2: (() -> Unit)? = null,
+    onOpenTopics: () -> Unit,
     onOpenDetail: (String) -> Unit,
 ) {
     val layout = rememberTvLayoutMetrics()
@@ -127,6 +131,9 @@ fun HomeScreen(
     var contentPage by remember { mutableIntStateOf(1) }
     var hasMoreContent by remember { mutableStateOf(true) }
     var loadingMoreContent by remember { mutableStateOf(false) }
+    var rankingTabs by remember { mutableStateOf<List<TvMovieRanking>>(emptyList()) }
+    var selectedRankingIndex by rememberSaveable { mutableIntStateOf(0) }
+    var selectedWeekDay by rememberSaveable { mutableIntStateOf(1) }
     var focusZone by remember { mutableStateOf(HomeFocusZone.Sidebar) }
     var showExitDialog by remember { mutableStateOf(false) }
 
@@ -145,6 +152,20 @@ fun HomeScreen(
         feedState?.config?.filterGroups?.firstOrNull { it.id == activeNavId }
     }
     val hasFilterPanel = activeNavId > 0 && activeFilterGroup != null
+    val isRankingNav = activeNavId == NAV_ID_RANKING
+    val isWeeklyNav = activeNavId == NAV_ID_WEEKLY
+    val weeklyTabs = remember {
+        listOf(
+            1 to "周一",
+            2 to "周二",
+            3 to "周三",
+            4 to "周四",
+            5 to "周五",
+            6 to "周六",
+            7 to "周日",
+        )
+    }
+    val rankingKey = rankingTabs.getOrNull(selectedRankingIndex)?.id.orEmpty()
     val topicFilters = if (activeNavId == 0) {
         TopicFilters()
     } else {
@@ -158,10 +179,15 @@ fun HomeScreen(
         classValue = topicFilters.classValue,
         area = topicFilters.area,
         year = topicFilters.year,
+        extraKey = when {
+            isRankingNav -> "ranking:$rankingKey:$selectedRankingIndex"
+            isWeeklyNav -> "weekly:$selectedWeekDay"
+            else -> ""
+        },
     )
 
     fun requestNextContentPage() {
-        if (activeNavId == 0 || contentLoading || loadingMoreContent || !hasMoreContent) return
+        if (activeNavId <= 0 || contentLoading || loadingMoreContent || !hasMoreContent) return
 
         val pageToLoad = contentPage
         loadingMoreContent = true
@@ -231,7 +257,7 @@ fun HomeScreen(
         }
     }
 
-    LaunchedEffect(feedState, activeNavId, topicFilters) {
+    LaunchedEffect(feedState, activeNavId, topicFilters, selectedRankingIndex, rankingKey, selectedWeekDay) {
         val feed = feedState ?: return@LaunchedEffect
         val nav = navItems.firstOrNull { it.id == activeNavId } ?: navItems.firstOrNull()
         if (nav == null) return@LaunchedEffect
@@ -253,6 +279,83 @@ fun HomeScreen(
             loadingMoreContent = false
             contentItems = recommendState.items
             scope.launch { gridState.scrollToItem(0) }
+            return@LaunchedEffect
+        }
+
+        if (activeNavId == NAV_ID_RANKING) {
+            screenCache[contentQueryKey]?.let { cached ->
+                contentItems = cached.items
+                contentLoading = false
+                loadingMoreContent = false
+                contentPage = cached.nextPage
+                hasMoreContent = cached.hasMore
+                scope.launch { gridState.scrollToItem(0) }
+                return@LaunchedEffect
+            }
+
+            contentLoading = true
+            loadingMoreContent = false
+            contentPage = 1
+            hasMoreContent = false
+            scope.launch { gridState.scrollToItem(0) }
+
+            val items = try {
+                val rankings = repository.getMovieRankings()
+                rankingTabs = rankings
+                val nextIndex = selectedRankingIndex.coerceIn(0, (rankings.size - 1).coerceAtLeast(0))
+                if (nextIndex != selectedRankingIndex) {
+                    selectedRankingIndex = nextIndex
+                }
+                val ranking = rankings.getOrNull(nextIndex)
+                ranking?.id?.let { repository.getMovieRankingItems(it) }?.takeIf { it.isNotEmpty() }
+                    ?: ranking?.items?.takeIf { it.isNotEmpty() }
+                    ?: emptyList()
+            } catch (_: Throwable) {
+                statusHost?.show("排行榜加载失败", "当前无法获取排行榜数据。", timeoutMs = 2600L)
+                emptyList()
+            }
+
+            contentItems = items
+            contentLoading = false
+            screenCache[contentQueryKey] = CachedScreenContent(
+                items = items,
+                nextPage = 1,
+                hasMore = false,
+            )
+            return@LaunchedEffect
+        }
+
+        if (activeNavId == NAV_ID_WEEKLY) {
+            screenCache[contentQueryKey]?.let { cached ->
+                contentItems = cached.items
+                contentLoading = false
+                loadingMoreContent = false
+                contentPage = cached.nextPage
+                hasMoreContent = cached.hasMore
+                scope.launch { gridState.scrollToItem(0) }
+                return@LaunchedEffect
+            }
+
+            contentLoading = true
+            loadingMoreContent = false
+            contentPage = 1
+            hasMoreContent = false
+            scope.launch { gridState.scrollToItem(0) }
+
+            val items = try {
+                repository.getWeeklyMovies(selectedWeekDay)
+            } catch (_: Throwable) {
+                statusHost?.show("周榜加载失败", "当前无法获取追剧周榜数据。", timeoutMs = 2600L)
+                emptyList()
+            }
+
+            contentItems = items
+            contentLoading = false
+            screenCache[contentQueryKey] = CachedScreenContent(
+                items = items,
+                nextPage = 1,
+                hasMore = false,
+            )
             return@LaunchedEffect
         }
 
@@ -303,7 +406,7 @@ fun HomeScreen(
     }
 
     LaunchedEffect(contentQueryKey, hasMoreContent, contentLoading, loadingMoreContent) {
-        if (activeNavId == 0) return@LaunchedEffect
+        if (activeNavId <= 0) return@LaunchedEffect
 
         snapshotFlow {
             val lastVisibleIndex = gridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
@@ -385,29 +488,47 @@ fun HomeScreen(
                     focusRequester = searchFocusRequester,
                     onFocused = { focusZone = HomeFocusZone.Sidebar },
                 )
-                if (onOpenHomeV2 != null) {
-                    SidebarTab(
-                        text = "新版",
-                        selected = false,
-                        rightFocusRequester = if (activeNavId == 0) filterEntryFocusRequester else gridEntryFocusRequester,
-                        onFocused = { focusZone = HomeFocusZone.Sidebar },
-                        onClick = onOpenHomeV2,
-                    )
-                }
 
-                navItems.forEachIndexed { index, item ->
-                    val rightTarget = if (item.id == 0) filterEntryFocusRequester else gridEntryFocusRequester
-                    SidebarTab(
-                        text = item.name,
-                        selected = item.id == activeNavId,
-                        modifier = if (index == 0) Modifier.focusRequester(navFocusRequester) else Modifier,
-                        rightFocusRequester = rightTarget,
-                        onFocused = { focusZone = HomeFocusZone.Sidebar },
-                        onClick = {
-                            activeNavId = item.id
-                            statusHost?.show("切换栏目", "正在查看 ${item.name}")
-                        },
-                    )
+                LazyColumn(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .focusGroup(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                    contentPadding = PaddingValues(vertical = 2.dp),
+                ) {
+                    items(count = navItems.size, key = { navItems[it].id }) { index ->
+                        val item = navItems[index]
+                        val rightTarget = when (item.id) {
+                            0, NAV_ID_RANKING, NAV_ID_WEEKLY -> filterEntryFocusRequester
+                            else -> gridEntryFocusRequester
+                        }
+                        SidebarTab(
+                            text = item.name,
+                            selected = item.id == activeNavId,
+                            modifier = if (index == 0) Modifier.focusRequester(navFocusRequester) else Modifier,
+                            rightFocusRequester = rightTarget,
+                            onFocused = { focusZone = HomeFocusZone.Sidebar },
+                            onClick = {
+                                activeNavId = item.id
+                                statusHost?.show("切换栏目", "正在查看 ${item.name}")
+                            },
+                        )
+                    }
+
+                    item(key = "topic") {
+                        SidebarTab(
+                            text = "专题",
+                            selected = false,
+                            rightFocusRequester = gridEntryFocusRequester,
+                            onFocused = { focusZone = HomeFocusZone.Sidebar },
+                            onClick = {
+                                statusHost?.show("专题", "正在进入专题页面")
+                                onOpenTopics()
+                            },
+                        )
+                    }
                 }
 
                 HistoryAction(
@@ -444,6 +565,28 @@ fun HomeScreen(
                     )
                 }
 
+                if (isRankingNav) {
+                    SpecialSubTabRow(
+                        label = "榜单",
+                        items = rankingTabs.map { it.title },
+                        selectedIndex = selectedRankingIndex,
+                        entryFocusRequester = filterEntryFocusRequester,
+                        exitFocusRequester = gridEntryFocusRequester,
+                        onFocused = { focusZone = HomeFocusZone.RightContent },
+                        onSelect = { selectedRankingIndex = it },
+                    )
+                } else if (isWeeklyNav) {
+                    SpecialSubTabRow(
+                        label = "周榜",
+                        items = weeklyTabs.map { it.second },
+                        selectedIndex = weeklyTabs.indexOfFirst { it.first == selectedWeekDay }.coerceAtLeast(0),
+                        entryFocusRequester = filterEntryFocusRequester,
+                        exitFocusRequester = gridEntryFocusRequester,
+                        onFocused = { focusZone = HomeFocusZone.RightContent },
+                        onSelect = { index -> selectedWeekDay = weeklyTabs.getOrNull(index)?.first ?: 1 },
+                    )
+                }
+
                 if (contentLoading && contentItems.isEmpty()) {
                     Box(modifier = Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
                         CircularProgressIndicator(color = MaterialTheme.colorScheme.primary, strokeWidth = 4.dp)
@@ -467,7 +610,11 @@ fun HomeScreen(
                         state = gridState,
                     ) {
                         itemsIndexed(contentItems, key = { _, item -> item.id }) { index, item ->
-                            val gridTopUpTarget = if (activeNavId == 0) navFocusRequester else filterExitFocusRequester
+                            val gridTopUpTarget = when {
+                                activeNavId == 0 -> navFocusRequester
+                                isRankingNav || isWeeklyNav -> filterEntryFocusRequester
+                                else -> filterExitFocusRequester
+                            }
                             CompactPosterCard(
                                 repository = repository,
                                 item = item,
@@ -509,6 +656,7 @@ private data class ScreenQueryKey(
     val classValue: String,
     val area: String,
     val year: String,
+    val extraKey: String = "",
 )
 
 private data class CachedScreenContent(
@@ -893,6 +1041,59 @@ private fun FilterItemChip(
 }
 
 @Composable
+private fun SpecialSubTabRow(
+    label: String,
+    items: List<String>,
+    selectedIndex: Int,
+    entryFocusRequester: FocusRequester,
+    exitFocusRequester: FocusRequester,
+    onSelect: (Int) -> Unit,
+    onFocused: () -> Unit = {},
+) {
+    if (items.isEmpty()) return
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.titleMedium.copy(
+                fontWeight = FontWeight.Bold,
+                fontSize = 16.sp,
+                color = Color.White.copy(alpha = 0.4f),
+            ),
+            modifier = Modifier.width(56.dp),
+        )
+        LazyRow(
+            modifier = Modifier
+                .weight(1f)
+                .focusGroup(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            contentPadding = PaddingValues(horizontal = 2.dp, vertical = 2.dp),
+        ) {
+            items(count = items.size) { index ->
+                val title = items[index]
+                FilterItemChip(
+                    text = title,
+                    selected = index == selectedIndex,
+                    modifier = if (index == 0) {
+                        Modifier
+                            .focusRequester(entryFocusRequester)
+                            .focusProperties { down = exitFocusRequester }
+                    } else {
+                        Modifier
+                    },
+                    onFocused = onFocused,
+                    onClick = { onSelect(index) },
+                )
+            }
+        }
+    }
+}
+
+@Composable
 private fun CompactPosterCard(
     repository: TvRepository,
     item: TvPosterItem,
@@ -948,7 +1149,6 @@ private fun CompactPosterCard(
                     repository = repository,
                 )
                 
-                // 遮罩渐变层增加深邃度
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
@@ -956,13 +1156,13 @@ private fun CompactPosterCard(
                             Brush.verticalGradient(
                                 colors = listOf(
                                     Color.Transparent,
-                                    Color.Black.copy(alpha = 0.78f)
+                                    Color.Black.copy(alpha = 0.72f),
                                 ),
-                                startY = 260f
-                            )
+                                startY = 280f,
+                            ),
                         ),
                 )
-                
+
                 val primaryBadge = item.label.ifBlank { item.remark }
                 if (primaryBadge.isNotBlank()) {
                     val remarkBackground = if (focused) MaterialTheme.colorScheme.primary else Color.Black.copy(alpha = 0.65f)
@@ -971,105 +1171,69 @@ private fun CompactPosterCard(
                         text = primaryBadge,
                         style = MaterialTheme.typography.titleSmall.copy(
                             fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold
+                            fontWeight = FontWeight.Bold,
                         ),
                         color = remarkTextColor,
                         modifier = Modifier
                             .padding(8.dp)
                             .background(
                                 color = remarkBackground,
-                                shape = RoundedCornerShape(6.dp)
+                                shape = RoundedCornerShape(6.dp),
                             )
                             .padding(horizontal = 8.dp, vertical = 4.dp),
                         maxLines = 1,
                     )
                 }
 
-                val metaBadges = listOfNotNull(
-                    item.score.takeIf { it.isNotBlank() },
-                    item.year.takeIf { it.isNotBlank() },
-                    item.category.takeIf { it.isNotBlank() },
-                ).distinct().take(3)
-                if (metaBadges.isNotEmpty()) {
-                    Row(
-                        modifier = Modifier
-                            .align(Alignment.BottomStart)
-                            .padding(start = 10.dp, end = 10.dp, bottom = 56.dp),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        metaBadges.forEach { badge ->
-                            Text(
-                                text = badge,
-                                style = MaterialTheme.typography.labelSmall.copy(
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = Color.White,
-                                ),
-                                modifier = Modifier
-                                    .background(
-                                        color = Color.Black.copy(alpha = if (focused) 0.7f else 0.55f),
-                                        shape = RoundedCornerShape(999.dp),
-                                    )
-                                    .padding(horizontal = 8.dp, vertical = 3.dp),
-                                maxLines = 1,
-                            )
-                        }
-                    }
-                }
-
-                Column(
+                Text(
+                    text = item.title,
+                    style = MaterialTheme.typography.titleMedium.copy(
+                        fontSize = 16.sp,
+                        fontWeight = if (focused) FontWeight.ExtraBold else FontWeight.Bold,
+                        color = Color.White,
+                    ),
                     modifier = Modifier
                         .align(Alignment.BottomStart)
                         .fillMaxWidth()
                         .padding(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(2.dp),
-                ) {
-                    Text(
-                        text = item.title,
-                        style = MaterialTheme.typography.titleMedium.copy(
-                            fontSize = 16.sp,
-                            fontWeight = if (focused) FontWeight.ExtraBold else FontWeight.Bold,
-                            color = Color.White,
-                        ),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-
-                    val subInfo = listOf(item.year, item.category).filter { it.isNotBlank() }.joinToString(" · ")
-                    if (subInfo.isNotBlank()) {
-                        Text(
-                            text = subInfo,
-                            style = MaterialTheme.typography.bodyMedium.copy(
-                                fontSize = 12.sp,
-                                color = Color.White.copy(alpha = 0.72f),
-                            ),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
-                }
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
             }
         }
     }
 }
 
 private fun buildHomeNavItems(items: List<TvNavItem>): List<TvNavItem> {
+    fun withSpecialItems(baseItems: List<TvNavItem>): List<TvNavItem> {
+        val result = baseItems.toMutableList()
+        if (result.none { it.id == NAV_ID_RANKING }) {
+            result += TvNavItem(id = NAV_ID_RANKING, name = "排行榜")
+        }
+        if (result.none { it.id == NAV_ID_WEEKLY }) {
+            result += TvNavItem(id = NAV_ID_WEEKLY, name = "追剧周榜")
+        }
+        return result
+    }
+
     if (items.isEmpty()) {
-        return listOf(
-            TvNavItem(id = 0, name = "推荐"),
-            TvNavItem(id = 1, name = "电影"),
-            TvNavItem(id = 2, name = "剧集"),
-            TvNavItem(id = 3, name = "综艺"),
-            TvNavItem(id = 4, name = "动漫"),
-            TvNavItem(id = 36, name = "短剧"),
-            TvNavItem(id = 26, name = "福利"),
+        return withSpecialItems(
+            listOf(
+                TvNavItem(id = 0, name = "推荐"),
+                TvNavItem(id = 1, name = "电影"),
+                TvNavItem(id = 2, name = "剧集"),
+                TvNavItem(id = 3, name = "综艺"),
+                TvNavItem(id = 4, name = "动漫"),
+                TvNavItem(id = 36, name = "短剧"),
+                TvNavItem(id = 26, name = "福利"),
+            ),
         )
     }
     val result = items.filter { it.id > 0 && it.name != "推荐" }.toMutableList()
     if (result.none { it.id == 0 }) {
         result.add(0, TvNavItem(id = 0, name = "推荐"))
     }
-    return result
+    return withSpecialItems(result)
 }
 
 private fun buildSortFilterOptions(values: List<String>): List<FilterOption> {
